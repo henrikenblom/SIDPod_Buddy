@@ -70,11 +70,13 @@ typedef struct _relData {
     int8_t scrollWheel;
 } relData_t;
 
-enum Movement {
+enum Gesture {
+    NONE,
     HORIZONTAL,
     VERTICAL,
     ROTATE,
-    CLICK
+    TAP,
+    DOUBLE_TAP,
 };
 
 struct _historyData {
@@ -87,10 +89,12 @@ uint16_t lastX = 0;
 uint16_t lastY = 0;
 double lastDegrees = 0;
 bool inSession = false;
-std::string currentMovement = "None";
+Gesture currentGesture = NONE;
 std::chrono::milliseconds lastMovementTime;
 int touchSamples = 0;
+int touchDowns = 0;
 std::vector<_historyData> historyVector;
+double accumulatedDelta = 0;
 
 relData_t relData;
 
@@ -100,7 +104,6 @@ AudioInfo info44k1(44100, 2, 16);
 BluetoothA2DPSource a2dp_source;
 I2SStream i2s;
 
-
 constexpr int BYTES_PER_FRAME = 4;
 
 int32_t get_sound_data(Frame *data, const int32_t frameCount) {
@@ -108,12 +111,8 @@ int32_t get_sound_data(Frame *data, const int32_t frameCount) {
            BYTES_PER_FRAME;
 }
 
-void avoidWatchdogReboots() {
-    delay(1000);
-}
 
 /*  Pinnacle-based TM040040 Functions  */
-
 
 /*  I/O Functions */
 void Assert_CS() {
@@ -122,10 +121,6 @@ void Assert_CS() {
 
 void DeAssert_CS() {
     digitalWrite(CS_PIN, HIGH);
-}
-
-void AssertSensorLED(bool state) {
-    //digitalWrite(LED_0, !state);
 }
 
 bool DR_Asserted() {
@@ -223,18 +218,6 @@ void Pinnacle_GetAbsolute(absData_t *result) {
     result->zValue = data[5] & 0x3F;
 
     result->touchDown = result->xValue != 0;
-}
-
-void Pinnacle_GetRelative(relData_t *result) {
-    uint8_t data[4] = {0, 0, 0, 0};
-    RAP_ReadBytes(PACKETBYTE_0_ADDRESS, data, 4);
-
-    Pinnacle_ClearFlags();
-
-    result->buttonFlags = data[0] & 0x07;
-    result->xDelta = data[1] | ((data[0] & 0x10) << 8);
-    result->yDelta = data[2] | ((data[0] & 0x20) << 8);
-    result->scrollWheel = data[3];
 }
 
 
@@ -335,205 +318,128 @@ void setup() {
     Serial.println("Ready");
 }
 
-void printRelData(_relData *relData) {
-    Serial.print("X: ");
-    Serial.print(relData->xDelta);
-    Serial.print(" Y: ");
-    Serial.print(relData->yDelta);
-    Serial.print(" Scroll: ");
-    Serial.print(relData->scrollWheel);
-    Serial.print(" Button: ");
-    Serial.println(relData->buttonFlags);
-}
-
-void printAbsData(_absData *absData) {
-    Serial.print("X: ");
-    Serial.print(absData->xValue);
-    Serial.print(" Y: ");
-    Serial.print(absData->yValue);
-    Serial.print(" Z: ");
-    Serial.print(absData->zValue);
-    Serial.print(" Button: ");
-    Serial.println(absData->buttonFlags);
-}
-
 double toDegrees(_absData *absData) {
     const int deltaX = absData->xValue - lastX;
     const int deltaY = absData->yValue - lastY;
     const double rad = atan2(deltaY, deltaX);
     double degrees = rad * 180 / M_PI;
-    // if (degrees < 0) {
-    //     degrees += 360;
-    // }
     return degrees;
 }
 
-int getVerticalChange(_absData *absData) {
+int getVerticalDelta(_absData *absData) {
     return absData->yValue - lastY;
 }
 
-int getHorizontalChange(_absData *absData) {
+int getHorizontalDelta(_absData *absData) {
     return absData->xValue - lastX;
 }
 
-// Add this function to identify gestures based on historyVector
-Movement identifyGesture(const std::vector<_historyData> &historyVector) {
-    // Sort by xValue to calculate horizontal movement
+double getRotationalDelta(double degrees) {
+    double delta = degrees - lastDegrees;
+    if (delta < -180) {
+        delta += 360;
+    } else if (delta > 180) {
+        delta -= 360;
+    }
+    return delta;
+}
+
+Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
     auto xSorted = historyVector;
     std::sort(xSorted.begin(), xSorted.end(), [](const _historyData &a, const _historyData &b) {
         return a.xValue < b.xValue;
     });
     int deltaX = xSorted.back().xValue - xSorted.front().xValue;
 
-    // Sort by yValue to calculate vertical movement
     auto ySorted = historyVector;
     std::sort(ySorted.begin(), ySorted.end(), [](const _historyData &a, const _historyData &b) {
         return a.yValue < b.yValue;
     });
     int deltaY = ySorted.back().yValue - ySorted.front().yValue;
 
-    // Sort by degreeValue to calculate rotation
     auto degreeSorted = historyVector;
     std::sort(degreeSorted.begin(), degreeSorted.end(), [](const _historyData &a, const _historyData &b) {
         return a.degreeValue < b.degreeValue;
     });
-    double deltaDegrees = degreeSorted.back().degreeValue - degreeSorted.front().degreeValue;
+    double deltaDegrees = round(degreeSorted.back().degreeValue - degreeSorted.front().degreeValue);
 
-    int degreeLimit = 18;
-    int deltaXLimit = 200;
-    if (degreeSorted.front().degreeValue < 0) {
-        degreeLimit = 8;
-        deltaXLimit = 300;
-    }
+    int degreeLimit = degreeSorted.front().degreeValue < 0 ? 7 : 18;
 
-    Serial.print("Delta degrees: ");
-    Serial.println(deltaDegrees);
-    Serial.print("Delta x: ");
-    Serial.println(deltaX);
-    Serial.print("Delta y: ");
-    Serial.println(deltaY);
-    Serial.print("Degree limit: ");
-    Serial.println(degreeLimit);
-    Serial.print("Delta X limit: ");
-    Serial.println(deltaXLimit);
-
-
-    // Determine the gesture
-    if (static_cast<int>(deltaDegrees) >= degreeLimit
+    if (deltaDegrees >= degreeLimit
         && ySorted.back().yValue >= 170
         && ySorted.back().yValue <= 400
         && deltaY < 80) {
-        Serial.println("Rotate");
         return ROTATE;
-    } else if (std::abs(deltaX) > std::abs(deltaY)) {
-        Serial.println("Horizontal");
+    }
+    if (std::abs(deltaX) > std::abs(deltaY)) {
         return HORIZONTAL;
-    } else {
-        Serial.println("Vertical");
-        return VERTICAL;
     }
-}
-
-std::string getMovement() {
-    for (_historyData data: historyVector) {
-        Serial.print("X: ");
-        Serial.print(data.xValue);
-        Serial.print(" Y: ");
-        Serial.print(data.yValue);
-        Serial.print(" Degrees: ");
-        Serial.println(data.degreeValue);
-    }
-    std::sort(historyVector.begin(), historyVector.end(), [](const _historyData &a, const _historyData &b) {
-        return a.xValue < b.xValue;
-    });
-    int deltaX = historyVector.back().xValue - historyVector.front().xValue;
-
-    std::sort(historyVector.begin(), historyVector.end(), [](const _historyData &a, const _historyData &b) {
-        return a.yValue < b.yValue;
-    });
-    int deltaY = historyVector.back().yValue - historyVector.front().yValue;
-
-    std::sort(historyVector.begin(), historyVector.end(), [](const _historyData &a, const _historyData &b) {
-        return a.degreeValue < b.degreeValue;
-    });
-    double deltaDegrees = historyVector.back().degreeValue - historyVector.front().degreeValue;
-    double deltaXYRatio = deltaX > deltaY
-                              ? static_cast<double>(deltaX) / static_cast<double>(deltaY)
-                              : static_cast<double>(deltaY) / static_cast<double>(deltaX);
-    if (deltaXYRatio < 0) {
-        deltaXYRatio *= -1;
-    }
-    // Serial.print("deltaDegrees: ");
-    // Serial.print(deltaDegrees);
-    // Serial.print(" deltaX: ");
-    // Serial.print(deltaX);
-    // Serial.print(" deltaY: ");
-    // Serial.print(deltaY);
-    // Serial.print(" deltaDeltaXY: ");
-    // Serial.println(deltaXYRatio);
-    return std::string("");
+    return VERTICAL;
 }
 
 void loop() {
     if (DR_Asserted()) {
         Pinnacle_GetAbsolute(&touchData);
-        if (touchData.xValue > 128 && touchData.xValue < 1920
-            && touchData.yValue > 64 && touchData.yValue < 1472
-            && touchData.zValue > 20) {
+        if (!touchData.touchDown) {
+            touchDowns++;
+        }
+        if (touchData.zValue > 20) {
             inSession = true;
             ScaleData(&touchData, 1000, 1000);
-            if (historyVector.size() > 6 && currentMovement == "None") {
-                currentMovement = getMovement();
-                identifyGesture(historyVector);
+            if (historyVector.size() > 4 && currentGesture == NONE) {
+                currentGesture = identifyGesture(historyVector);
             }
-
             if ((touchData.xValue || touchData.yValue)
                 && (lastX != touchData.xValue || lastY != touchData.yValue)) {
-                double degrees = toDegrees(&touchData);
-                if (touchSamples > 6) {
+                const double degrees = toDegrees(&touchData);
+                if (touchSamples > 6 && currentGesture == NONE) {
                     historyVector.push_back({
                         touchData.xValue,
                         touchData.yValue,
                         degrees
                     });
                 }
-
-                if (currentMovement != "None") {
-                    // if (currentMovement == "HORIZONTAL") {
-                    //     Serial.print("Horizontal: ");
-                    //     Serial.println(getHorizontalChange(&touchData));
-                    // } else if (currentMovement == "VERTICAL") {
-                    //     Serial.print("Vertical: ");
-                    //     Serial.println(getVerticalChange(&touchData));
-                    // } else if (currentMovement == "ROTATE") {
-                    //Serial.print("Rotate: ");
-                    //Serial.println(degrees);
-                    // } else if (currentMovement == "CLICK") {
-                    //     Serial.println("Click");
-                    // } else {
-                    //     Serial.println("None");
-                    // }
+                if (currentGesture == HORIZONTAL) {
+                    accumulatedDelta += getHorizontalDelta(&touchData);
+                } else if (currentGesture == VERTICAL) {
+                    accumulatedDelta -= getVerticalDelta(&touchData);
+                } else if (currentGesture == ROTATE) {
+                    accumulatedDelta += getRotationalDelta(degrees);
                 }
                 lastDegrees = degrees;
             }
-
             lastX = touchData.xValue;
             lastY = touchData.yValue;
             lastMovementTime = std::chrono::milliseconds(millis());
+            if (accumulatedDelta > 15) {
+                Serial.println("Gesture: " + String(currentGesture));
+                Serial.println("Tick up");
+                accumulatedDelta = 0;
+            }
+            if (accumulatedDelta < -15) {
+                Serial.println("Gesture: " + String(currentGesture));
+                Serial.println("Tick down");
+                accumulatedDelta = 0;
+            }
             touchSamples++;
         }
-    } else if (inSession && millis() - lastMovementTime.count() > 150) {
+    } else if (inSession && millis() - lastMovementTime.count() > 200) {
         inSession = false;
-        if (currentMovement == "None") {
-            Serial.println("CLICK");
+        if (touchSamples > 3 && currentGesture == NONE) {
+            currentGesture = touchDowns > 5 ? DOUBLE_TAP : TAP;
+            if (currentGesture == TAP) {
+                Serial.println("TAP");
+            } else {
+                Serial.println("DOUBLE TAP");
+            }
         }
-        Serial.print("Touch samples: ");
-        Serial.println(touchSamples);
+        accumulatedDelta = 0;
         touchSamples = 0;
+        touchDowns = 0;
         lastY = 0;
         lastX = 0;
         lastDegrees = 0;
         historyVector.clear();
-        currentMovement = "None";
+        currentGesture = NONE;
     }
 }
