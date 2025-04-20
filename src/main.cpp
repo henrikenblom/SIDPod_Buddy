@@ -307,6 +307,9 @@ void ScaleData(absData_t *coordinates, uint16_t xResolution, uint16_t yResolutio
 void setup() {
     setCpuFrequencyMhz(80);
     Serial.begin(115200);
+
+    Serial1.begin(115200);
+
     auto cfg = i2s.defaultConfig(RX_MODE);
     cfg.i2s_format = I2S_STD_FORMAT;
     cfg.is_master = false;
@@ -414,11 +417,13 @@ void loop() {
             if (accumulatedDelta > 15) {
                 Serial.println("Gesture: " + String(currentGesture));
                 Serial.println("Tick up");
+                Serial1.write('1');
                 accumulatedDelta = 0;
             }
             if (accumulatedDelta < -15) {
                 Serial.println("Gesture: " + String(currentGesture));
                 Serial.println("Tick down");
+                Serial1.write('2');
                 accumulatedDelta = 0;
             }
             touchSamples++;
