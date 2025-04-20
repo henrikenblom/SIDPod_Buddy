@@ -1,9 +1,11 @@
 #include <Arduino.h>
 #include <chrono>
+#include <set>
 
 #include "AudioTools.h"
 #include "AudioTools/AudioLibs/A2DPStream.h"
 #include <SPI.h>
+#include "BuddyInterface.h"
 
 // ___ Using a Cirque TM040040 with an Arduino ___
 // This demonstration application is built to work with a Teensy 3.1/3.2 but it can easily be adapted to
@@ -70,30 +72,37 @@ typedef struct _relData {
     int8_t scrollWheel;
 } relData_t;
 
-enum Gesture {
-    NONE,
-    HORIZONTAL,
-    VERTICAL,
-    ROTATE,
-    TAP,
-    DOUBLE_TAP,
-};
-
 struct _historyData {
     uint16_t xValue;
     uint16_t yValue;
     double degreeValue;
 };
 
+enum Gesture {
+    G_NONE = 0,
+    G_HORIZONTAL = 1,
+    G_VERTICAL = 2,
+    G_ROTATE = 3,
+    G_TAP = 4,
+    G_DOUBLE_TAP = 5,
+};
+
+enum Direction {
+    D_NONE = 0,
+    D_UP = 1,
+    D_DOWN = 2,
+};
+
 uint16_t lastX = 0;
 uint16_t lastY = 0;
 double lastDegrees = 0;
 bool inSession = false;
-Gesture currentGesture = NONE;
+Gesture currentGesture = G_NONE;
 std::chrono::milliseconds lastMovementTime;
 int touchSamples = 0;
 int touchDowns = 0;
 std::vector<_historyData> historyVector;
+std::set<String> btDevices;
 double accumulatedDelta = 0;
 
 relData_t relData;
@@ -111,6 +120,21 @@ int32_t get_sound_data(Frame *data, const int32_t frameCount) {
            BYTES_PER_FRAME;
 }
 
+bool btDeviceIsValid(const char* ssid, esp_bd_addr_t address, int rssi){
+    Serial.print("available SSID: ");
+    Serial.print(ssid);
+    Serial.print(" address: ");
+    for (int i = 0; i < ESP_BD_ADDR_LEN; i++) {
+        Serial.print(address[i], HEX);
+        if (i < ESP_BD_ADDR_LEN - 1) {
+            Serial.print(":");
+        }
+    }
+    Serial.print(" rssi: ");
+    Serial.println(rssi);
+    btDevices.emplace(ssid);
+    return false;
+}
 
 /*  Pinnacle-based TM040040 Functions  */
 
@@ -317,7 +341,10 @@ void setup() {
     i2s.begin(cfg);
 
     Pinnacle_Init();
-    a2dp_source.start("84-1511", get_sound_data);
+    a2dp_source.set_ssid_callback(btDeviceIsValid);
+    //a2dp_source.start("84-1511", get_sound_data);
+    a2dp_source.start();
+
     Serial.println("Ready");
 }
 
@@ -372,12 +399,15 @@ Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
         && ySorted.back().yValue >= 170
         && ySorted.back().yValue <= 400
         && deltaY < 80) {
-        return ROTATE;
+        return G_ROTATE;
     }
     if (std::abs(deltaX) > std::abs(deltaY)) {
-        return HORIZONTAL;
+        return G_HORIZONTAL;
     }
-    return VERTICAL;
+    return G_VERTICAL;
+}
+
+void sendGestureMessage(const Gesture gesture, const Direction direction) {
 }
 
 void loop() {
@@ -389,24 +419,24 @@ void loop() {
         if (touchData.zValue > 20) {
             inSession = true;
             ScaleData(&touchData, 1000, 1000);
-            if (historyVector.size() > 4 && currentGesture == NONE) {
+            if (historyVector.size() > 4 && currentGesture == G_NONE) {
                 currentGesture = identifyGesture(historyVector);
             }
             if ((touchData.xValue || touchData.yValue)
                 && (lastX != touchData.xValue || lastY != touchData.yValue)) {
                 const double degrees = toDegrees(&touchData);
-                if (touchSamples > 6 && currentGesture == NONE) {
+                if (touchSamples > 6 && currentGesture == G_NONE) {
                     historyVector.push_back({
                         touchData.xValue,
                         touchData.yValue,
                         degrees
                     });
                 }
-                if (currentGesture == HORIZONTAL) {
+                if (currentGesture == G_HORIZONTAL) {
                     accumulatedDelta += getHorizontalDelta(&touchData);
-                } else if (currentGesture == VERTICAL) {
+                } else if (currentGesture == G_VERTICAL) {
                     accumulatedDelta -= getVerticalDelta(&touchData);
-                } else if (currentGesture == ROTATE) {
+                } else if (currentGesture == G_ROTATE) {
                     accumulatedDelta += getRotationalDelta(degrees);
                 }
                 lastDegrees = degrees;
@@ -414,29 +444,16 @@ void loop() {
             lastX = touchData.xValue;
             lastY = touchData.yValue;
             lastMovementTime = std::chrono::milliseconds(millis());
-            if (accumulatedDelta > 15) {
-                Serial.println("Gesture: " + String(currentGesture));
-                Serial.println("Tick up");
-                Serial1.write('1');
-                accumulatedDelta = 0;
-            }
-            if (accumulatedDelta < -15) {
-                Serial.println("Gesture: " + String(currentGesture));
-                Serial.println("Tick down");
-                Serial1.write('2');
+            if (accumulatedDelta > 15 || accumulatedDelta < -15) {
+                sendGestureMessage(currentGesture, accumulatedDelta > 0 ? D_UP : D_DOWN);
                 accumulatedDelta = 0;
             }
             touchSamples++;
         }
     } else if (inSession && millis() - lastMovementTime.count() > 200) {
         inSession = false;
-        if (touchSamples > 3 && currentGesture == NONE) {
-            currentGesture = touchDowns > 5 ? DOUBLE_TAP : TAP;
-            if (currentGesture == TAP) {
-                Serial.println("TAP");
-            } else {
-                Serial.println("DOUBLE TAP");
-            }
+        if (touchSamples > 3 && currentGesture == G_NONE) {
+            sendGestureMessage(touchDowns > 5 ? G_DOUBLE_TAP : G_TAP, D_NONE);
         }
         accumulatedDelta = 0;
         touchSamples = 0;
@@ -445,6 +462,22 @@ void loop() {
         lastX = 0;
         lastDegrees = 0;
         historyVector.clear();
-        currentGesture = NONE;
+        currentGesture = G_NONE;
+    }
+
+    if (Serial1.available()) {
+        char type = Serial1.read();
+        if (type == static_cast<char>(RT_BT_LIST)) {
+            Serial1.flush();
+            for (const auto& device : btDevices) {
+                Serial1.println(device);
+            }
+        } else if (type == static_cast<char>(RT_BT_SELECT)) {
+            Serial.println("MT_BT_SELECT");
+            auto selected = Serial1.readStringUntil('\n');
+            Serial1.flush();
+            Serial.print("Selected device: ");
+            Serial.println(selected);
+        }
     }
 }
