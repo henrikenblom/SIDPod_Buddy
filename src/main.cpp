@@ -58,7 +58,7 @@
 
 #define VERTICAL_STEP_SIZE   50
 #define HORIZONTAL_STEP_SIZE  40
-#define ROTATE_STEP_SIZE     10
+#define ROTATE_STEP_SIZE     20
 
 // Convenient way to store and access measurements
 typedef struct _absData {
@@ -406,19 +406,14 @@ Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
 }
 
 void bang(const uint8_t pin, const bool modifier1, const bool modifier2 = false) {
-    digitalWrite(pin, HIGH);
     digitalWrite(MODIFIER1_PIN, modifier1 ? HIGH : LOW);
     digitalWrite(MODIFIER2_PIN, modifier2 ? HIGH : LOW);
+    delay(10);
+    digitalWrite(pin, HIGH);
     delay(20);
     digitalWrite(pin, LOW);
     digitalWrite(MODIFIER1_PIN, LOW);
     digitalWrite(MODIFIER2_PIN, LOW);
-    Serial.print("Bang: ");
-    Serial.print(pin);
-    Serial.print(" ");
-    Serial.print(modifier1 ? "mod1" : "");
-    Serial.print(" ");
-    Serial.println(modifier2 ? "mod2" : "");
 }
 
 void sendGesture(const Gesture gesture, const bool modifier = false) {
