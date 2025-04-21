@@ -56,6 +56,10 @@
 #define PINNACLE_X_RANGE  (PINNACLE_X_UPPER-PINNACLE_X_LOWER)
 #define PINNACLE_Y_RANGE  (PINNACLE_Y_UPPER-PINNACLE_Y_LOWER)
 
+#define VERTICAL_STEP_SIZE   50
+#define HORIZONTAL_STEP_SIZE  40
+#define ROTATE_STEP_SIZE     10
+
 // Convenient way to store and access measurements
 typedef struct _absData {
     uint16_t xValue;
@@ -85,20 +89,16 @@ enum Gesture {
     G_ROTATE = 3,
     G_TAP = 4,
     G_DOUBLE_TAP = 5,
-};
-
-enum Direction {
-    D_NONE = 0,
-    D_UP = 1,
-    D_DOWN = 2,
+    G_HOME = 6,
 };
 
 uint16_t lastX = 0;
 uint16_t lastY = 0;
 double lastDegrees = 0;
-bool inSession = false;
+bool inSession, lastAccumulatedDeltaGTZero, gestureSent = false;
 Gesture currentGesture = G_NONE;
-std::chrono::milliseconds lastMovementTime;
+int currentStepSize = 0;
+std::chrono::milliseconds lastMovementTime, lastStepUpdateTime, lastSessionEndTime;
 int touchSamples = 0;
 int touchDowns = 0;
 std::vector<_historyData> historyVector;
@@ -120,18 +120,7 @@ int32_t get_sound_data(Frame *data, const int32_t frameCount) {
            BYTES_PER_FRAME;
 }
 
-bool btDeviceIsValid(const char* ssid, esp_bd_addr_t address, int rssi){
-    Serial.print("available SSID: ");
-    Serial.print(ssid);
-    Serial.print(" address: ");
-    for (int i = 0; i < ESP_BD_ADDR_LEN; i++) {
-        Serial.print(address[i], HEX);
-        if (i < ESP_BD_ADDR_LEN - 1) {
-            Serial.print(":");
-        }
-    }
-    Serial.print(" rssi: ");
-    Serial.println(rssi);
+bool btDeviceIsValid(const char *ssid, esp_bd_addr_t address, int rssi) {
     btDevices.emplace(ssid);
     return false;
 }
@@ -327,12 +316,21 @@ void ScaleData(absData_t *coordinates, uint16_t xResolution, uint16_t yResolutio
     coordinates->yValue = (uint16_t) (yTemp * yResolution / PINNACLE_Y_RANGE);
 }
 
+void setupPins() {
+    pinMode(TAP_PIN, OUTPUT);
+    pinMode(VERTICAL_PIN, OUTPUT);
+    pinMode(HORIZONTAL_PIN, OUTPUT);
+    pinMode(ROTATE_PIN, OUTPUT);
+    pinMode(MODIFIER1_PIN, OUTPUT);
+    pinMode(MODIFIER2_PIN, OUTPUT);
+    pinMode(BT_CONNECTED_PIN, OUTPUT);
+}
 
 void setup() {
     setCpuFrequencyMhz(80);
     Serial.begin(115200);
-
     Serial1.begin(115200);
+    setupPins();
 
     auto cfg = i2s.defaultConfig(RX_MODE);
     cfg.i2s_format = I2S_STD_FORMAT;
@@ -407,11 +405,61 @@ Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
     return G_VERTICAL;
 }
 
-void sendGestureMessage(const Gesture gesture, const Direction direction) {
+void bang(const uint8_t pin, const bool modifier1, const bool modifier2 = false) {
+    digitalWrite(pin, HIGH);
+    digitalWrite(MODIFIER1_PIN, modifier1 ? HIGH : LOW);
+    digitalWrite(MODIFIER2_PIN, modifier2 ? HIGH : LOW);
+    delay(20);
+    digitalWrite(pin, LOW);
+    digitalWrite(MODIFIER1_PIN, LOW);
+    digitalWrite(MODIFIER2_PIN, LOW);
+    Serial.print("Bang: ");
+    Serial.print(pin);
+    Serial.print(" ");
+    Serial.print(modifier1 ? "mod1" : "");
+    Serial.print(" ");
+    Serial.println(modifier2 ? "mod2" : "");
+}
+
+void sendGesture(const Gesture gesture, const bool modifier = false) {
+    switch (gesture) {
+        case G_TAP:
+            bang(TAP_PIN, false);
+            break;
+        case G_DOUBLE_TAP:
+            bang(TAP_PIN, true);
+            break;
+        case G_HOME:
+            bang(TAP_PIN, true, true);
+            break;
+        case G_VERTICAL:
+            bang(VERTICAL_PIN, modifier);
+            break;
+        case G_HORIZONTAL:
+            bang(HORIZONTAL_PIN, modifier);
+            break;
+        case G_ROTATE:
+            bang(ROTATE_PIN, modifier);
+            break;
+        default:
+            break;
+    }
+    gestureSent = true;
+}
+
+int getStepSizeForCurrentGesture() {
+    switch (currentGesture) {
+        case G_HORIZONTAL:
+            return HORIZONTAL_STEP_SIZE;
+        case G_VERTICAL:
+            return VERTICAL_STEP_SIZE;
+        default:
+            return ROTATE_STEP_SIZE;
+    }
 }
 
 void loop() {
-    if (DR_Asserted()) {
+    if (millis() - lastSessionEndTime.count() > 100 && DR_Asserted()) {
         Pinnacle_GetAbsolute(&touchData);
         if (!touchData.touchDown) {
             touchDowns++;
@@ -421,6 +469,7 @@ void loop() {
             ScaleData(&touchData, 1000, 1000);
             if (historyVector.size() > 4 && currentGesture == G_NONE) {
                 currentGesture = identifyGesture(historyVector);
+                currentStepSize = getStepSizeForCurrentGesture();
             }
             if ((touchData.xValue || touchData.yValue)
                 && (lastX != touchData.xValue || lastY != touchData.yValue)) {
@@ -444,16 +493,28 @@ void loop() {
             lastX = touchData.xValue;
             lastY = touchData.yValue;
             lastMovementTime = std::chrono::milliseconds(millis());
-            if (accumulatedDelta > 15 || accumulatedDelta < -15) {
-                sendGestureMessage(currentGesture, accumulatedDelta > 0 ? D_UP : D_DOWN);
+            if (accumulatedDelta > currentStepSize || accumulatedDelta < currentStepSize * -1) {
+                lastAccumulatedDeltaGTZero = accumulatedDelta > 0;
+                sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
                 accumulatedDelta = 0;
+                lastStepUpdateTime = std::chrono::milliseconds(millis());
+            } else if (currentGesture == G_VERTICAL
+                       && millis() - lastStepUpdateTime.count() > 400
+                       && (lastY > 710 || lastY < 330)) {
+                sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
             }
             touchSamples++;
         }
-    } else if (inSession && millis() - lastMovementTime.count() > 200) {
+    } else if (inSession && millis() - lastMovementTime.count() > 180) {
         inSession = false;
-        if (touchSamples > 3 && currentGesture == G_NONE) {
-            sendGestureMessage(touchDowns > 5 ? G_DOUBLE_TAP : G_TAP, D_NONE);
+        if (touchSamples > 3 && touchSamples < 20 && !gestureSent) {
+            if (touchDowns <= 5) {
+                sendGesture(G_TAP);
+            } else if (lastY < 300) {
+                sendGesture(G_HOME);
+            } else {
+                sendGesture(G_DOUBLE_TAP);
+            }
         }
         accumulatedDelta = 0;
         touchSamples = 0;
@@ -463,13 +524,15 @@ void loop() {
         lastDegrees = 0;
         historyVector.clear();
         currentGesture = G_NONE;
+        gestureSent = false;
+        lastSessionEndTime = std::chrono::milliseconds(millis());
     }
 
     if (Serial1.available()) {
         char type = Serial1.read();
         if (type == static_cast<char>(RT_BT_LIST)) {
             Serial1.flush();
-            for (const auto& device : btDevices) {
+            for (const auto &device: btDevices) {
                 Serial1.println(device);
             }
         } else if (type == static_cast<char>(RT_BT_SELECT)) {
