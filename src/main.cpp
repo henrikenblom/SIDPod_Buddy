@@ -499,8 +499,8 @@ void loop() {
                 accumulatedDelta = 0;
                 lastStepUpdateTime = std::chrono::milliseconds(millis());
             } else if (currentGesture == G_VERTICAL
-                       && millis() - lastStepUpdateTime.count() > 400
-                       && (lastY > 710 || lastY < 330)) {
+                       && millis() - lastStepUpdateTime.count() > 350
+                       && (lastY > 667 || lastY < 333)) {
                 sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
             }
             touchSamples++;
@@ -510,7 +510,7 @@ void loop() {
         if (touchSamples > 3 && touchSamples < 20 && !gestureSent) {
             if (touchDowns <= 5) {
                 sendGesture(G_TAP);
-            } else if (lastY < 300) {
+            } else if (lastY < 333) {
                 sendGesture(G_HOME);
             } else {
                 sendGesture(G_DOUBLE_TAP);
