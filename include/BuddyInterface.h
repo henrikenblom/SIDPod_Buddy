@@ -11,8 +11,7 @@
 #define ROTATE_PIN               13
 #define MODIFIER1_PIN            12
 #define MODIFIER2_PIN            27
-
-#define BT_CONNECTED_PIN         4
+#define BT_CONNECTION_PIN         4
 
 enum RequestType {
     RT_NONE = 0,

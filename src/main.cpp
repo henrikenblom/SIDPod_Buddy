@@ -6,41 +6,24 @@
 #include "AudioTools/AudioLibs/A2DPStream.h"
 #include "BuddyInterface.h"
 #include "TM0XX0XX.h"
-
-#define VERTICAL_STEP_SIZE   50
-#define HORIZONTAL_STEP_SIZE  40
-#define ROTATE_STEP_SIZE     15
-
-struct _historyData {
-    uint16_t xValue;
-    uint16_t yValue;
-    double degreeValue;
-};
-
-enum Gesture {
-    G_NONE = 0,
-    G_HORIZONTAL = 1,
-    G_VERTICAL = 2,
-    G_ROTATE = 3,
-    G_TAP = 4,
-    G_DOUBLE_TAP = 5,
-    G_HOME = 6,
-};
+#include "main.h"
 
 uint16_t lastX, lastY = 0;
-bool inSession, lastAccumulatedDeltaGTZero, gestureSent = false;
+bool inSession, lastAccumulatedDeltaGTZero, gestureSent, isConnected = false;
 Gesture currentGesture = G_NONE;
 std::chrono::milliseconds lastMovementTime, lastStepUpdateTime, lastSessionEndTime;
-int touchSamples, touchDowns, currentStepSize = 0;
+int touchSamples, touchDowns, currentStepSize, connectionAttempts = 0;
 std::vector<_historyData> historyVector;
 std::set<String> btDevices;
 double accumulatedDelta, lastDegrees = 0;
+String selectedSSID;
 
 absData_t touchData;
 
 AudioInfo info44k1(44100, 2, 16);
 BluetoothA2DPSource a2dp_source;
 I2SStream i2s;
+
 
 constexpr int BYTES_PER_FRAME = 4;
 
@@ -49,8 +32,50 @@ int32_t get_sound_data(Frame *data, const int32_t frameCount) {
            BYTES_PER_FRAME;
 }
 
+void sendConnectedUpdate() {
+    bang(BT_CONNECTION_PIN);
+}
+
+void sendDisconnectedUpdate() {
+    bang(BT_CONNECTION_PIN, true);
+}
+
+void sendConnectingUpdate() {
+    bang(BT_CONNECTION_PIN, true, true);
+}
+
+void signalDeviceListChange() {
+    bang(BT_CONNECTION_PIN, false, true);
+}
+
+void connection_state_changed(esp_a2d_connection_state_t state, void *ptr) {
+    if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+        Serial.println("Disconnected");
+        isConnected = false;
+        sendDisconnectedUpdate();
+    } else if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+        Serial.println("Connected");
+        connectionAttempts = 0;
+        isConnected = true;
+        sendConnectedUpdate();
+    } else if (state == ESP_A2D_CONNECTION_STATE_CONNECTING) {
+        Serial.println("Connecting");
+        sendConnectingUpdate();
+    }
+}
+
 bool btDeviceIsValid(const char *ssid, esp_bd_addr_t address, int rssi) {
-    btDevices.emplace(ssid);
+    auto ssidString = String(ssid);
+    if (!ssidString.isEmpty()) {
+        if (!selectedSSID.isEmpty()
+            && ssidString.equals(selectedSSID)) {
+            return true;
+            }
+        if (btDevices.find(ssidString) == btDevices.end()) {
+            btDevices.emplace(ssid);
+            signalDeviceListChange();
+        }
+    }
     return false;
 }
 
@@ -61,13 +86,13 @@ void setupPins() {
     pinMode(ROTATE_PIN, OUTPUT);
     pinMode(MODIFIER1_PIN, OUTPUT);
     pinMode(MODIFIER2_PIN, OUTPUT);
-    pinMode(BT_CONNECTED_PIN, OUTPUT);
+    pinMode(BT_CONNECTION_PIN, OUTPUT);
 }
 
 void setup() {
     setCpuFrequencyMhz(80);
     Serial.begin(115200);
-    Serial1.begin(115200);
+    Serial1.begin(9600);
     setupPins();
 
     auto cfg = i2s.defaultConfig(RX_MODE);
@@ -78,10 +103,11 @@ void setup() {
 
     Pinnacle_Init();
     a2dp_source.set_ssid_callback(btDeviceIsValid);
-    //a2dp_source.start("84-1511", get_sound_data);
+    a2dp_source.set_on_connection_state_changed(connection_state_changed);
+    a2dp_source.set_data_callback_in_frames(get_sound_data);
     a2dp_source.start();
 
-    Serial.println("Ready");
+    digitalWrite(BT_CONNECTION_PIN, LOW);
 }
 
 double toDegrees(_absData *absData) {
@@ -143,7 +169,7 @@ Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
     return G_VERTICAL;
 }
 
-void bang(const uint8_t pin, const bool modifier1, const bool modifier2 = false) {
+void bang(const uint8_t pin, const bool modifier1, const bool modifier2) {
     digitalWrite(MODIFIER1_PIN, modifier1 ? HIGH : LOW);
     digitalWrite(MODIFIER2_PIN, modifier2 ? HIGH : LOW);
     delay(10);
@@ -189,6 +215,11 @@ int getStepSizeForCurrentGesture() {
         default:
             return ROTATE_STEP_SIZE;
     }
+}
+
+void forgetCurrentDevice() {
+    selectedSSID = "";
+    a2dp_source.clean_last_connection();
 }
 
 void loop() {
@@ -263,17 +294,22 @@ void loop() {
 
     if (Serial1.available()) {
         char type = Serial1.read();
-        if (type == static_cast<char>(RT_BT_LIST)) {
-            Serial1.flush();
+        Serial1.flush();
+        if (type == static_cast<char>(RT_BT_LIST) && !btDevices.empty()) {
+            Serial.println("RT_BT_LIST");
             for (const auto &device: btDevices) {
                 Serial1.println(device);
+                Serial.print("'");
+                Serial.print(device);
+                Serial.println("'");
             }
         } else if (type == static_cast<char>(RT_BT_SELECT)) {
-            Serial.println("MT_BT_SELECT");
-            auto selected = Serial1.readStringUntil('\n');
-            Serial1.flush();
-            Serial.print("Selected device: ");
-            Serial.println(selected);
+            selectedSSID = Serial1.readStringUntil('\n');
+            selectedSSID.remove(selectedSSID.length() - 1);
+            Serial.print("RT_BT_SELECT: ");
+            Serial.println(selectedSSID);
+        } else if (type == static_cast<char>(RT_BT_DISCONNECT)) {
+            forgetCurrentDevice();
         }
     }
 }
