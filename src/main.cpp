@@ -187,7 +187,9 @@ int getStepSizeForCurrentGesture() {
 
 void forgetCurrentDevice() {
     selectedSSID = "";
+    a2dp_source.disconnect();
     a2dp_source.clean_last_connection();
+    a2dp_source.start();
 }
 
 void loop() {
