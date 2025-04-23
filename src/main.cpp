@@ -63,7 +63,7 @@ void connection_state_changed(esp_a2d_connection_state_t state, void *ptr) {
     }
 }
 
-bool btDeviceIsValid(const char *ssid, const esp_bd_addr_t address, const int rssi) {
+bool btDeviceIsValid(const char *ssid, esp_bd_addr_t address, int rssi) {
     (void)address;
     (void)rssi;
     const auto ssidString = String(ssid);
