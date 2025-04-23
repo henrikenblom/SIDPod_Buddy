@@ -9,8 +9,8 @@
 #include "main.h"
 
 uint16_t lastX, lastY = 0;
-bool inSession, lastAccumulatedDeltaGTZero, gestureSent, isConnected = false;
-Gesture currentGesture = G_NONE;
+bool inSession, lastAccumulatedDeltaGTZero, gestureSent = false;
+Gesture currentGesture, forcedGesture = G_NONE;
 std::chrono::milliseconds lastMovementTime, lastStepUpdateTime, lastSessionEndTime, lastDeviceValidation;
 int touchSamples, touchDowns, currentStepSize, connectionAttempts = 0;
 std::vector<_historyData> historyVector;
@@ -31,41 +31,33 @@ int32_t getSoundData(Frame *data, const int32_t frameCount) {
            BYTES_PER_FRAME;
 }
 
-void sendConnectedUpdate() {
-    bang(BT_CONNECTION_PIN);
-}
-
-void sendDisconnectedUpdate() {
-    bang(BT_CONNECTION_PIN, true);
-}
-
-void sendConnectingUpdate() {
-    bang(BT_CONNECTION_PIN, true, true);
-}
-
-void signalDeviceListChange() {
-    bang(BT_CONNECTION_PIN, false, true);
+void setConnected(bool connected) {
+    if (connected) {
+        digitalWrite(BT_CONNECTED_PIN, HIGH);
+    } else {
+        digitalWrite(BT_CONNECTED_PIN, LOW);
+    }
 }
 
 void connection_state_changed(esp_a2d_connection_state_t state, void *ptr) {
     if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
         Serial.println("Disconnected");
-        isConnected = false;
-        sendDisconnectedUpdate();
+        setConnected(false);
+        sendNotification(NT_BT_DISCONNECTED);
     } else if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
         Serial.println("Connected");
         connectionAttempts = 0;
-        isConnected = true;
-        sendConnectedUpdate();
+        setConnected(true);
+        sendNotification(NT_BT_CONNECTED);
     } else if (state == ESP_A2D_CONNECTION_STATE_CONNECTING) {
         Serial.println("Connecting");
-        sendConnectingUpdate();
+        sendNotification(NT_BT_CONNECTING);
     }
 }
 
 bool btDeviceIsValid(const char *ssid, esp_bd_addr_t address, int rssi) {
-    (void)address;
-    (void)rssi;
+    (void) address;
+    (void) rssi;
     const auto ssidString = String(ssid);
     if (!ssidString.isEmpty()) {
         if (!selectedSSID.isEmpty()
@@ -74,26 +66,22 @@ bool btDeviceIsValid(const char *ssid, esp_bd_addr_t address, int rssi) {
         }
         if (btDevices.find(ssidString) == btDevices.end()) {
             btDevices.emplace(ssid);
-            signalDeviceListChange();
+            sendNotification(NT_BT_DEVICE_LIST_CHANGED);
         }
     }
     return false;
 }
 
 void setupPins() {
-    pinMode(TAP_PIN, OUTPUT);
-    pinMode(VERTICAL_PIN, OUTPUT);
-    pinMode(HORIZONTAL_PIN, OUTPUT);
-    pinMode(ROTATE_PIN, OUTPUT);
-    pinMode(MODIFIER1_PIN, OUTPUT);
-    pinMode(MODIFIER2_PIN, OUTPUT);
-    pinMode(BT_CONNECTION_PIN, OUTPUT);
+    pinMode(SIDPOD_DW_PIN, OUTPUT);
+    pinMode(SIDPOD_DR_PIN, INPUT);
+    pinMode(BT_CONNECTED_PIN, OUTPUT);
 }
 
 void setup() {
     setCpuFrequencyMhz(80);
     Serial.begin(115200);
-    Serial1.begin(9600);
+    Serial1.begin(115200);
     setupPins();
 
     auto cfg = i2s.defaultConfig(RX_MODE);
@@ -108,7 +96,7 @@ void setup() {
     a2dp_source.set_data_callback_in_frames(getSoundData);
     a2dp_source.start();
 
-    digitalWrite(BT_CONNECTION_PIN, LOW);
+    digitalWrite(BT_CONNECTED_PIN, LOW);
 }
 
 double toDegrees(const _absData *absData) {
@@ -138,6 +126,9 @@ double getRotationalDelta(double degrees) {
 }
 
 Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
+    if (forcedGesture != G_NONE) {
+        return forcedGesture;
+    }
     auto xSorted = historyVector;
     std::sort(xSorted.begin(), xSorted.end(), [](const _historyData &a, const _historyData &b) {
         return a.xValue < b.xValue;
@@ -170,40 +161,16 @@ Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
     return G_VERTICAL;
 }
 
-void bang(const uint8_t pin, const bool modifier1, const bool modifier2) {
-    digitalWrite(MODIFIER1_PIN, modifier1 ? HIGH : LOW);
-    digitalWrite(MODIFIER2_PIN, modifier2 ? HIGH : LOW);
-    delay(10);
-    digitalWrite(pin, HIGH);
-    delay(40);
-    digitalWrite(pin, LOW);
-    digitalWrite(MODIFIER1_PIN, LOW);
-    digitalWrite(MODIFIER2_PIN, LOW);
+void sendNotification(const NotificationType notificationType) {
+    Serial1.write(notificationType);
 }
 
 void sendGesture(const Gesture gesture, const bool modifier = false) {
-    switch (gesture) {
-        case G_TAP:
-            bang(TAP_PIN, false);
-            break;
-        case G_DOUBLE_TAP:
-            bang(TAP_PIN, true);
-            break;
-        case G_HOME:
-            bang(TAP_PIN, true, true);
-            break;
-        case G_VERTICAL:
-            bang(VERTICAL_PIN, modifier);
-            break;
-        case G_HORIZONTAL:
-            bang(HORIZONTAL_PIN, modifier);
-            break;
-        case G_ROTATE:
-            bang(ROTATE_PIN, modifier);
-            break;
-        default:
-            break;
-    }
+    Serial1.write(NT_GESTURE);
+    Serial1.write(gesture);
+    Serial1.write(modifier ? 1 : 0);
+    Serial1.flush();
+    delay(POST_GESTURE_DELAY_MS);
     gestureSent = true;
 }
 
@@ -307,10 +274,19 @@ void loop() {
         } else if (type == static_cast<char>(RT_BT_SELECT)) {
             selectedSSID = Serial1.readStringUntil('\n');
             selectedSSID.remove(selectedSSID.length() - 1);
+            Serial1.flush();
             Serial.print("RT_BT_SELECT: ");
-            Serial.println(selectedSSID);
+            Serial.println("'" + selectedSSID + "'");
         } else if (type == static_cast<char>(RT_BT_DISCONNECT)) {
             forgetCurrentDevice();
+        } else if (type == static_cast<char>(RT_G_FORCE_ROTATE)) {
+            forcedGesture = G_ROTATE;
+        } else if (type == static_cast<char>(RT_G_FORCE_VERTICAL)) {
+            forcedGesture = G_VERTICAL;
+        } else if (type == static_cast<char>(RT_G_FORCE_HORIZONTAL)) {
+            forcedGesture = G_HORIZONTAL;
+        } else if (type == static_cast<char>(RT_G_SET_AUTO)) {
+            forcedGesture = G_NONE;
         }
     }
 
