@@ -24,10 +24,9 @@ AudioInfo info44k1(44100, 2, 16);
 BluetoothA2DPSource a2dp_source;
 I2SStream i2s;
 
-
 constexpr int BYTES_PER_FRAME = 4;
 
-int32_t get_sound_data(Frame *data, const int32_t frameCount) {
+int32_t getSoundData(Frame *data, const int32_t frameCount) {
     return static_cast<int32_t>(i2s.readBytes(reinterpret_cast<uint8_t *>(data), frameCount * BYTES_PER_FRAME)) /
            BYTES_PER_FRAME;
 }
@@ -64,8 +63,10 @@ void connection_state_changed(esp_a2d_connection_state_t state, void *ptr) {
     }
 }
 
-bool btDeviceIsValid(const char *ssid, esp_bd_addr_t address, int rssi) {
-    auto ssidString = String(ssid);
+bool btDeviceIsValid(const char *ssid, const esp_bd_addr_t address, const int rssi) {
+    (void)address;
+    (void)rssi;
+    const auto ssidString = String(ssid);
     if (!ssidString.isEmpty()) {
         if (!selectedSSID.isEmpty()
             && ssidString.equals(selectedSSID)) {
@@ -101,16 +102,16 @@ void setup() {
     cfg.set(info44k1);
     i2s.begin(cfg);
 
-    Pinnacle_Init();
+    pinnacleInit();
     a2dp_source.set_ssid_callback(btDeviceIsValid);
     a2dp_source.set_on_connection_state_changed(connection_state_changed);
-    a2dp_source.set_data_callback_in_frames(get_sound_data);
+    a2dp_source.set_data_callback_in_frames(getSoundData);
     a2dp_source.start();
 
     digitalWrite(BT_CONNECTION_PIN, LOW);
 }
 
-double toDegrees(_absData *absData) {
+double toDegrees(const _absData *absData) {
     const int deltaX = absData->xValue - lastX;
     const int deltaY = absData->yValue - lastY;
     const double rad = atan2(deltaY, deltaX);
@@ -118,11 +119,11 @@ double toDegrees(_absData *absData) {
     return degrees;
 }
 
-int getVerticalDelta(_absData *absData) {
+int getVerticalDelta(const _absData *absData) {
     return absData->yValue - lastY;
 }
 
-int getHorizontalDelta(_absData *absData) {
+int getHorizontalDelta(const _absData *absData) {
     return absData->xValue - lastX;
 }
 
@@ -223,14 +224,14 @@ void forgetCurrentDevice() {
 }
 
 void loop() {
-    if (millis() - lastSessionEndTime.count() > 100 && DR_Asserted()) {
-        Pinnacle_GetAbsolute(&touchData);
+    if (millis() - lastSessionEndTime.count() > 100 && drAsserted()) {
+        pinnacleGetAbsolute(&touchData);
         if (!touchData.touchDown) {
             touchDowns++;
         }
         if (touchData.zValue > 20) {
             inSession = true;
-            ScaleData(&touchData, 1000, 1000);
+            scaleData(&touchData, 1000, 1000);
             if (historyVector.size() > 5 && currentGesture == G_NONE) {
                 currentGesture = identifyGesture(historyVector);
                 currentStepSize = getStepSizeForCurrentGesture();
