@@ -5,9 +5,10 @@
 #ifndef MAIN_H
 #define MAIN_H
 
-#define VERTICAL_STEP_SIZE          50
-#define HORIZONTAL_STEP_SIZE        40
-#define ROTATE_STEP_SIZE            15
+#define VERTICAL_STEP_SIZE              55
+#define HORIZONTAL_STEP_SIZE            40
+#define ROTATE_STEP_SIZE                15
+#define DEVICE_VALIDATION_INTERVAL_MS   20000
 
 struct _historyData {
     uint16_t xValue;

@@ -11,7 +11,7 @@
 uint16_t lastX, lastY = 0;
 bool inSession, lastAccumulatedDeltaGTZero, gestureSent, isConnected = false;
 Gesture currentGesture = G_NONE;
-std::chrono::milliseconds lastMovementTime, lastStepUpdateTime, lastSessionEndTime;
+std::chrono::milliseconds lastMovementTime, lastStepUpdateTime, lastSessionEndTime, lastDeviceValidation;
 int touchSamples, touchDowns, currentStepSize, connectionAttempts = 0;
 std::vector<_historyData> historyVector;
 std::set<String> btDevices;
@@ -70,7 +70,7 @@ bool btDeviceIsValid(const char *ssid, esp_bd_addr_t address, int rssi) {
         if (!selectedSSID.isEmpty()
             && ssidString.equals(selectedSSID)) {
             return true;
-            }
+        }
         if (btDevices.find(ssidString) == btDevices.end()) {
             btDevices.emplace(ssid);
             signalDeviceListChange();
@@ -155,12 +155,12 @@ Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
     });
     double deltaDegrees = round(degreeSorted.back().degreeValue - degreeSorted.front().degreeValue);
 
-    int degreeLimit = degreeSorted.front().degreeValue < 0 ? 7 : 18;
+    int degreeLimit = static_cast<int>(degreeSorted.front().degreeValue < 0 ? 0.3 : 2) * deltaY;
 
     if (deltaDegrees >= degreeLimit
         && ySorted.back().yValue >= 170
         && ySorted.back().yValue <= 400
-        && deltaY < 80) {
+        && deltaY < 200) {
         return G_ROTATE;
     }
     if (std::abs(deltaX) > std::abs(deltaY)) {
@@ -231,7 +231,7 @@ void loop() {
         if (touchData.zValue > 20) {
             inSession = true;
             ScaleData(&touchData, 1000, 1000);
-            if (historyVector.size() > 4 && currentGesture == G_NONE) {
+            if (historyVector.size() > 5 && currentGesture == G_NONE) {
                 currentGesture = identifyGesture(historyVector);
                 currentStepSize = getStepSizeForCurrentGesture();
             }
@@ -264,7 +264,7 @@ void loop() {
                 lastStepUpdateTime = std::chrono::milliseconds(millis());
             } else if (currentGesture == G_VERTICAL
                        && millis() - lastStepUpdateTime.count() > 350
-                       && (lastY > 667 || lastY < 333)) {
+                       && (lastY > 800 || lastY < 200)) {
                 sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
             }
             touchSamples++;
@@ -311,5 +311,10 @@ void loop() {
         } else if (type == static_cast<char>(RT_BT_DISCONNECT)) {
             forgetCurrentDevice();
         }
+    }
+
+    if (millis() - lastDeviceValidation.count() > DEVICE_VALIDATION_INTERVAL_MS) {
+        btDevices.clear();
+        lastDeviceValidation = std::chrono::milliseconds(millis());
     }
 }
