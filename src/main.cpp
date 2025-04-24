@@ -8,15 +8,17 @@
 #include "TM0XX0XX.h"
 #include "main.h"
 
+#include <map>
+
 uint16_t lastX, lastY = 0;
 bool inSession, lastAccumulatedDeltaGTZero, gestureSent = false;
 Gesture currentGesture, forcedGesture = G_NONE;
 std::chrono::milliseconds lastMovementTime, lastStepUpdateTime, lastSessionEndTime, lastDeviceValidation;
 int touchSamples, touchDowns, currentStepSize, connectionAttempts = 0;
 std::vector<_historyData> historyVector;
-std::set<String> btDevices;
+std::map<std::string, std::array<uint8_t, 6> > btDevices;
 double accumulatedDelta, lastDegrees = 0;
-String selectedSSID;
+std::string selectedSSID;
 
 absData_t touchData;
 
@@ -58,14 +60,21 @@ void connection_state_changed(esp_a2d_connection_state_t state, void *ptr) {
 bool btDeviceIsValid(const char *ssid, esp_bd_addr_t address, int rssi) {
     (void) address;
     (void) rssi;
-    const auto ssidString = String(ssid);
-    if (!ssidString.isEmpty()) {
-        if (!selectedSSID.isEmpty()
-            && ssidString.equals(selectedSSID)) {
+    const auto ssidString = std::string(ssid);
+    if (!ssidString.empty()) {
+        if (!selectedSSID.empty()
+            && ssidString == selectedSSID) {
             return true;
         }
         if (btDevices.find(ssidString) == btDevices.end()) {
-            btDevices.emplace(ssid);
+            btDevices[ssidString] = std::array<uint8_t, 6>{
+                address[0],
+                address[1],
+                address[2],
+                address[3],
+                address[4],
+                address[5]
+            };
             sendNotification(NT_BT_DEVICE_LIST_CHANGED);
         }
     }
@@ -268,17 +277,25 @@ void loop() {
         if (type == static_cast<char>(RT_BT_LIST) && !btDevices.empty()) {
             Serial.println("RT_BT_LIST");
             for (const auto &device: btDevices) {
-                Serial1.println(device);
+                Serial1.println(device.first.c_str());
                 Serial.print("'");
-                Serial.print(device);
+                Serial.print(device.first.c_str());
                 Serial.println("'");
             }
         } else if (type == static_cast<char>(RT_BT_SELECT)) {
-            selectedSSID = Serial1.readStringUntil('\n');
-            selectedSSID.remove(selectedSSID.length() - 1);
+            selectedSSID = Serial1.readStringUntil('\n').c_str();
+            selectedSSID = selectedSSID.substr(0, selectedSSID.length() - 1);
+            auto addressArray = btDevices.find(selectedSSID)->second;
+            esp_bd_addr_t addr = {
+                addressArray[0],
+                addressArray[1],
+                addressArray[2],
+                addressArray[3],
+                addressArray[4],
+                addressArray[5]
+            };
+            setConnected(a2dp_source.connect_to(addr));
             Serial1.flush();
-            Serial.print("RT_BT_SELECT: ");
-            Serial.println("'" + selectedSSID + "'");
         } else if (type == static_cast<char>(RT_BT_DISCONNECT)) {
             forgetCurrentDevice();
         } else if (type == static_cast<char>(RT_G_FORCE_ROTATE)) {
