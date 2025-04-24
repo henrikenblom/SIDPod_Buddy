@@ -43,12 +43,12 @@ typedef struct _absData {
     bool touchDown;
 } absData_t;
 
-void Pinnacle_Init();
+void pinnacleInit();
 
-bool DR_Asserted();
+bool drAsserted();
 
-void Pinnacle_GetAbsolute(absData_t *result);
+void pinnacleGetAbsolute(absData_t *result);
 
-void ScaleData(absData_t *coordinates, uint16_t xResolution, uint16_t yResolution);
+void scaleData(absData_t *coordinates, uint16_t xResolution, uint16_t yResolution);
 
 #endif //TM0XX0XX_H
