@@ -22,6 +22,7 @@ enum RequestType {
     RT_G_FORCE_VERTICAL = 5,
     RT_G_FORCE_HORIZONTAL = 6,
     RT_G_SET_AUTO = 7,
+    RT_BT_GET_CONNECTED = 8,
 };
 
 enum NotificationType {

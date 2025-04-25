@@ -18,6 +18,7 @@ std::vector<_historyData> historyVector;
 std::map<std::string, std::array<uint8_t, 6> > btDevices;
 double accumulatedDelta, lastDegrees = 0;
 std::string selectedSSID;
+esp_bd_addr_t selectedAddress;
 
 absData_t touchData;
 
@@ -201,6 +202,11 @@ void forgetCurrentDevice() {
     a2dp_source.start();
 }
 
+void getCurrentDeviceAddress(esp_bd_addr_t addr) {
+    auto addressArray = btDevices.find(selectedSSID)->second;
+    std::copy(addressArray.begin(), addressArray.end(), addr);
+}
+
 void loop() {
     if (millis() - lastSessionEndTime.count() > 100 && drAsserted()) {
         pinnacleGetAbsolute(&touchData);
@@ -285,26 +291,24 @@ void loop() {
         } else if (type == static_cast<char>(RT_BT_SELECT)) {
             selectedSSID = Serial1.readStringUntil('\n').c_str();
             selectedSSID = selectedSSID.substr(0, selectedSSID.length() - 1);
-            auto addressArray = btDevices.find(selectedSSID)->second;
-            esp_bd_addr_t addr = {
-                addressArray[0],
-                addressArray[1],
-                addressArray[2],
-                addressArray[3],
-                addressArray[4],
-                addressArray[5]
-            };
-            setConnected(a2dp_source.connect_to(addr));
+            getCurrentDeviceAddress(selectedAddress);
+            setConnected(a2dp_source.connect_to(selectedAddress));
             Serial1.flush();
         } else if (type == static_cast<char>(RT_BT_DISCONNECT)) {
             forgetCurrentDevice();
+        } else if (type == static_cast<char>(RT_BT_GET_CONNECTED)) {
+            Serial1.println(selectedSSID.c_str());
+            Serial1.write(selectedAddress, 6);
         } else if (type == static_cast<char>(RT_G_FORCE_ROTATE)) {
+            Serial.println("RT_G_FORCE_ROTATE");
             forcedGesture = G_ROTATE;
         } else if (type == static_cast<char>(RT_G_FORCE_VERTICAL)) {
+            Serial.println("RT_G_FORCE_VERTICAL");
             forcedGesture = G_VERTICAL;
         } else if (type == static_cast<char>(RT_G_FORCE_HORIZONTAL)) {
             forcedGesture = G_HORIZONTAL;
         } else if (type == static_cast<char>(RT_G_SET_AUTO)) {
+            Serial.println("RT_G_SET_AUTO");
             forcedGesture = G_NONE;
         }
     }
