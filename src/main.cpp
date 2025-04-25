@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include <chrono>
-#include <set>
 
 #include "AudioTools.h"
 #include "AudioTools/AudioLibs/A2DPStream.h"
@@ -44,6 +43,7 @@ void setConnected(bool connected) {
 void connection_state_changed(esp_a2d_connection_state_t state, void *ptr) {
     if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
         Serial.println("Disconnected");
+        selectedSSID = "";
         setConnected(false);
         sendNotification(NT_BT_DISCONNECTED);
     } else if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
