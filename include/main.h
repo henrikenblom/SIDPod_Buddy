@@ -5,11 +5,9 @@
 #ifndef MAIN_H
 #define MAIN_H
 
-#define VERTICAL_STEP_SIZE              55
-#define HORIZONTAL_STEP_SIZE            40
-#define ROTATE_STEP_SIZE                15
+#define ROTATE_STEP_SIZE                50
 #define DEVICE_VALIDATION_INTERVAL_MS   40000
-#define POST_GESTURE_DELAY_MS           40
+#define POST_GESTURE_DELAY_MS           150
 #include "BuddyInterface.h"
 
 struct _historyData {

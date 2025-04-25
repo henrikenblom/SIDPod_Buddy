@@ -10,14 +10,13 @@
 #include <map>
 
 uint16_t lastX, lastY = 0;
-bool inSession, lastAccumulatedDeltaGTZero, gestureSent = false;
-Gesture currentGesture, forcedGesture = G_NONE;
+bool inSession, gestureSent = false;
 std::chrono::milliseconds lastMovementTime, lastStepUpdateTime, lastSessionEndTime, lastDeviceValidation;
-int touchSamples, touchDowns, currentStepSize, connectionAttempts = 0;
-std::vector<_historyData> historyVector;
+int touchSamples, touchDowns, connectionAttempts = 0;
 std::map<std::string, std::array<uint8_t, 6> > btDevices;
 double accumulatedDelta, lastDegrees = 0;
 std::string selectedSSID;
+std::vector<bool> rotationHistory;
 
 absData_t touchData;
 
@@ -116,14 +115,6 @@ double toDegrees(const _absData *absData) {
     return degrees;
 }
 
-int getVerticalDelta(const _absData *absData) {
-    return absData->yValue - lastY;
-}
-
-int getHorizontalDelta(const _absData *absData) {
-    return absData->xValue - lastX;
-}
-
 double getRotationalDelta(double degrees) {
     double delta = degrees - lastDegrees;
     if (delta < -180) {
@@ -132,42 +123,6 @@ double getRotationalDelta(double degrees) {
         delta -= 360;
     }
     return delta;
-}
-
-Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
-    if (forcedGesture != G_NONE) {
-        return forcedGesture;
-    }
-    auto xSorted = historyVector;
-    std::sort(xSorted.begin(), xSorted.end(), [](const _historyData &a, const _historyData &b) {
-        return a.xValue < b.xValue;
-    });
-    int deltaX = xSorted.back().xValue - xSorted.front().xValue;
-
-    auto ySorted = historyVector;
-    std::sort(ySorted.begin(), ySorted.end(), [](const _historyData &a, const _historyData &b) {
-        return a.yValue < b.yValue;
-    });
-    int deltaY = ySorted.back().yValue - ySorted.front().yValue;
-
-    auto degreeSorted = historyVector;
-    std::sort(degreeSorted.begin(), degreeSorted.end(), [](const _historyData &a, const _historyData &b) {
-        return a.degreeValue < b.degreeValue;
-    });
-    double deltaDegrees = round(degreeSorted.back().degreeValue - degreeSorted.front().degreeValue);
-
-    int degreeLimit = static_cast<int>(degreeSorted.front().degreeValue < 0 ? 0.3 : 2) * deltaY;
-
-    if (deltaDegrees >= degreeLimit
-        && ySorted.back().yValue >= 170
-        && ySorted.back().yValue <= 400
-        && deltaY < 200) {
-        return G_ROTATE;
-    }
-    if (std::abs(deltaX) > std::abs(deltaY)) {
-        return G_HORIZONTAL;
-    }
-    return G_VERTICAL;
 }
 
 void sendNotification(const NotificationType notificationType) {
@@ -183,14 +138,18 @@ void sendGesture(const Gesture gesture, const bool modifier = false) {
     gestureSent = true;
 }
 
-int getStepSizeForCurrentGesture() {
-    switch (currentGesture) {
-        case G_HORIZONTAL:
-            return HORIZONTAL_STEP_SIZE;
-        case G_VERTICAL:
-            return VERTICAL_STEP_SIZE;
-        default:
-            return ROTATE_STEP_SIZE;
+void sendDeJitteredRotationGesture(const bool modifier = false) {
+    rotationHistory.push_back(modifier);
+    if (rotationHistory.size() > 4) {
+        rotationHistory.erase(rotationHistory.begin());
+    }
+    if (rotationHistory.size() == 4
+        && rotationHistory[0] != modifier
+        && rotationHistory[1] != modifier
+        && rotationHistory[2] != modifier
+        && rotationHistory[3] != modifier) {
+    } else {
+        sendGesture(G_ROTATE, modifier);
     }
 }
 
@@ -207,48 +166,35 @@ void loop() {
         if (!touchData.touchDown) {
             touchDowns++;
         }
-        if (touchData.zValue > 20) {
-            inSession = true;
-            scaleData(&touchData, 1000, 1000);
-            if (historyVector.size() > 5 && currentGesture == G_NONE) {
-                currentGesture = identifyGesture(historyVector);
-                currentStepSize = getStepSizeForCurrentGesture();
-            }
-            if ((touchData.xValue || touchData.yValue)
-                && (lastX != touchData.xValue || lastY != touchData.yValue)) {
-                const double degrees = toDegrees(&touchData);
-                if (touchSamples > 6 && currentGesture == G_NONE) {
-                    historyVector.push_back({
-                        touchData.xValue,
-                        touchData.yValue,
-                        degrees
-                    });
-                }
-                if (currentGesture == G_HORIZONTAL) {
-                    accumulatedDelta += getHorizontalDelta(&touchData);
-                } else if (currentGesture == G_VERTICAL) {
-                    accumulatedDelta -= getVerticalDelta(&touchData);
-                } else if (currentGesture == G_ROTATE) {
+        if (touchData.zValue > 30) {
+            if (touchSamples > 5) {
+                inSession = true;
+                scaleData(&touchData, 1000, 1000);
+                if ((touchData.xValue || touchData.yValue)
+                    && (lastX != touchData.xValue || lastY != touchData.yValue)) {
+                    const double degrees = toDegrees(&touchData);
                     accumulatedDelta += getRotationalDelta(degrees);
+                    lastDegrees = degrees;
                 }
-                lastDegrees = degrees;
-            }
-            lastX = touchData.xValue;
-            lastY = touchData.yValue;
-            lastMovementTime = std::chrono::milliseconds(millis());
-            if (accumulatedDelta > currentStepSize || accumulatedDelta < currentStepSize * -1) {
-                lastAccumulatedDeltaGTZero = accumulatedDelta > 0;
-                sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
-                accumulatedDelta = 0;
-                lastStepUpdateTime = std::chrono::milliseconds(millis());
-            } else if (currentGesture == G_VERTICAL
-                       && millis() - lastStepUpdateTime.count() > 350
-                       && (lastY > 800 || lastY < 200)) {
-                sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
+                lastX = touchData.xValue;
+                lastY = touchData.yValue;
+                lastMovementTime = std::chrono::milliseconds(millis());
+                if (touchSamples >= 20
+                    && (accumulatedDelta > ROTATE_STEP_SIZE || accumulatedDelta < ROTATE_STEP_SIZE * -1)) {
+                    sendDeJitteredRotationGesture(accumulatedDelta > 0);
+                    accumulatedDelta = 0;
+                    lastStepUpdateTime = std::chrono::milliseconds(millis());
+                }
             }
             touchSamples++;
         }
     } else if (inSession && millis() - lastMovementTime.count() > 180) {
+        Serial.print("gestureSent: ");
+        Serial.println(gestureSent);
+        Serial.print("touchDowns: ");
+        Serial.println(touchDowns);
+        Serial.print("touchSamples: ");
+        Serial.println(touchSamples);
         inSession = false;
         if (touchSamples > 3 && touchSamples < 20 && !gestureSent) {
             if (touchDowns <= 5) {
@@ -265,10 +211,9 @@ void loop() {
         lastY = 0;
         lastX = 0;
         lastDegrees = 0;
-        historyVector.clear();
-        currentGesture = G_NONE;
         gestureSent = false;
         lastSessionEndTime = std::chrono::milliseconds(millis());
+        rotationHistory.clear();
     }
 
     if (Serial1.available()) {
@@ -298,14 +243,6 @@ void loop() {
             Serial1.flush();
         } else if (type == static_cast<char>(RT_BT_DISCONNECT)) {
             forgetCurrentDevice();
-        } else if (type == static_cast<char>(RT_G_FORCE_ROTATE)) {
-            forcedGesture = G_ROTATE;
-        } else if (type == static_cast<char>(RT_G_FORCE_VERTICAL)) {
-            forcedGesture = G_VERTICAL;
-        } else if (type == static_cast<char>(RT_G_FORCE_HORIZONTAL)) {
-            forcedGesture = G_HORIZONTAL;
-        } else if (type == static_cast<char>(RT_G_SET_AUTO)) {
-            forcedGesture = G_NONE;
         }
     }
 
