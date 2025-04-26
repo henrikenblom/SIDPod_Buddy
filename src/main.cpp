@@ -101,6 +101,7 @@ void setup() {
     i2s.begin(cfg);
 
     pinnacleInit();
+    a2dp_source.set_local_name("SIDPod");
     a2dp_source.set_ssid_callback(btDeviceIsValid);
     a2dp_source.set_on_connection_state_changed(connection_state_changed);
     a2dp_source.set_data_callback_in_frames(getSoundData);
