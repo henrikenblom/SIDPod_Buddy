@@ -261,7 +261,13 @@ void loop() {
             if (touchDowns <= 5) {
                 sendGesture(G_TAP);
             } else if (lastY < 333) {
-                sendGesture(G_HOME);
+                sendGesture(G_NORTH);
+            } else if (lastY > 666) {
+                sendGesture(G_SOUTH);
+            } else if (lastX < 333) {
+                sendGesture(G_WEST);
+            } else if (lastX > 666) {
+                sendGesture(G_EAST);
             } else {
                 sendGesture(G_DOUBLE_TAP);
             }
