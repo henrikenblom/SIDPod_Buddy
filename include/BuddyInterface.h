@@ -5,12 +5,6 @@
 #ifndef BUDDYINTERFACE_H
 #define BUDDYINTERFACE_H
 
-#define SIDPOD_DR_PIN                  21
-#define SIDPOD_DW_PIN             16
-#define HORIZONTAL_PIN           26
-#define ROTATE_PIN               13
-#define MODIFIER1_PIN            12
-#define MODIFIER2_PIN            27
 #define BT_CONNECTED_PIN         4
 
 enum RequestType {

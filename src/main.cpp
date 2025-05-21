@@ -28,12 +28,14 @@ I2SStream i2s;
 
 constexpr int BYTES_PER_FRAME = 4;
 
-int32_t getSoundData(Frame *data, const int32_t frameCount) {
-    return static_cast<int32_t>(i2s.readBytes(reinterpret_cast<uint8_t *>(data), frameCount * BYTES_PER_FRAME)) /
-           BYTES_PER_FRAME;
-}
-
 void setConnected(bool connected) {
+    Serial.print("Connected: ");
+    Serial.println(connected);
+    Serial.print("A2DP audio state: ");
+    Serial.println(a2dp_source.to_str(a2dp_source.get_audio_state()));
+    Serial.print("A2DP connection state: ");
+    Serial.println(a2dp_source.to_str(a2dp_source.get_connection_state()));
+
     if (connected) {
         digitalWrite(BT_CONNECTED_PIN, HIGH);
     } else {
@@ -83,8 +85,6 @@ bool btDeviceIsValid(const char *ssid, esp_bd_addr_t address, int rssi) {
 }
 
 void setupPins() {
-    pinMode(SIDPOD_DW_PIN, OUTPUT);
-    pinMode(SIDPOD_DR_PIN, INPUT);
     pinMode(BT_CONNECTED_PIN, OUTPUT);
 }
 
@@ -97,6 +97,9 @@ void setup() {
     auto cfg = i2s.defaultConfig(RX_MODE);
     cfg.i2s_format = I2S_STD_FORMAT;
     cfg.is_master = false;
+    cfg.pin_bck = 26;
+    cfg.pin_ws = 27;
+    cfg.pin_data = 32;
     cfg.set(info44k1);
     i2s.begin(cfg);
 
@@ -104,7 +107,7 @@ void setup() {
     a2dp_source.set_local_name("SIDPod");
     a2dp_source.set_ssid_callback(btDeviceIsValid);
     a2dp_source.set_on_connection_state_changed(connection_state_changed);
-    a2dp_source.set_data_callback_in_frames(getSoundData);
+    a2dp_source.set_data_source(i2s);
     a2dp_source.start();
 
     digitalWrite(BT_CONNECTED_PIN, LOW);
@@ -172,7 +175,21 @@ Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
     return G_VERTICAL;
 }
 
+const char* getNotificationTypeName(NotificationType type) {
+    switch (type) {
+        case NT_NONE: return "NT_NONE";
+        case NT_GESTURE: return "NT_GESTURE";
+        case NT_BT_CONNECTED: return "NT_BT_CONNECTED";
+        case NT_BT_DISCONNECTED: return "NT_BT_DISCONNECTED";
+        case NT_BT_DEVICE_LIST_CHANGED: return "NT_BT_DEVICE_LIST_CHANGED";
+        case NT_BT_CONNECTING: return "NT_BT_CONNECTING";
+        default: return "UNKNOWN_NOTIFICATION";
+    }
+}
+
 void sendNotification(const NotificationType notificationType) {
+    Serial.print("Sending notification: ");
+    Serial.println(getNotificationTypeName(notificationType));
     Serial1.write(notificationType);
 }
 
