@@ -7,13 +7,11 @@
 #include "TM0XX0XX.h"
 #include "main.h"
 
-#include <TensorFlowLite_ESP32.h> // Specific header for ESP32 (often included by lib)
-#include <tensorflow/lite/micro/all_ops_resolver.h> // Or use MicroMutableOpResolver for smaller code
+#include <TensorFlowLite_ESP32.h>
 #include <tensorflow/lite/micro/micro_interpreter.h>
-#include <tensorflow/lite/micro/system_setup.h>
 #include <tensorflow/lite/schema/schema_generated.h>
-#include <tensorflow/lite/micro/micro_mutable_op_resolver.h> // If using a custom resolver
-#include "emnist_uppercase_qat_model.h"
+#include <tensorflow/lite/micro/micro_mutable_op_resolver.h>
+#include "emnist_uppercase_model_qat_float16.h"
 
 #include <map>
 
@@ -22,21 +20,10 @@
 // Constants for the model
 const int kModelInputWidth = 28;
 const int kModelInputHeight = 28;
-const int kModelInputChannels = 1; // Grayscale
-const int kModelOutputClasses = 26; // Uppercase A-Z
+const int kModelInputChannels = 1;
+const int kModelOutputClasses = 26;
 
-// An area of memory to use for input, output, and intermediate arrays.
-// ESP32 has different memory regions. It's best to allocate in PSRAM if available,
-// or a larger chunk of internal SRAM.
-// PSRAM usage: DRAM_ATTR is for DRAM, but for PSRAM, use `SPIRAM_ATTR` on supported boards.
-// If your ESP32 has PSRAM and you want to use it:
-// #include <esp_heap_caps.h> // Needed for PSRAM
-// uint8_t* tensor_arena = NULL; // Declare as pointer
-// In setup():
-//   tensor_arena = (uint8_t*)heap_caps_malloc(kTensorArenaSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-//   if (tensor_arena == NULL) { Serial.println("Failed to allocate PSRAM tensor arena!"); while(1); }
-// Otherwise, for internal SRAM:
-const int kTensorArenaSize = 40 * 1024; // 40 KB - Adjust based on your model size
+const int kTensorArenaSize = 24 * 1024;
 uint8_t tensor_arena[kTensorArenaSize];
 
 // Pointers to the model, interpreter, and tensors
@@ -154,18 +141,20 @@ void setup() {
 
     digitalWrite(BT_CONNECTED_PIN, LOW);
 
-    model = tflite::GetModel(emnist_uppercase_qat_model_tflite);
+    model = tflite::GetModel(emnist_uppercase_model_qat_float16);
     if (model->version() != TFLITE_SCHEMA_VERSION) {
         MicroPrintf("Model schema mismatch! Expected %d, got %d",
                     TFLITE_SCHEMA_VERSION, model->version());
         while (1);
     }
 
-    static tflite::MicroMutableOpResolver<5> resolver;
+    static tflite::MicroMutableOpResolver<7> resolver;
     resolver.AddConv2D();
     resolver.AddMaxPool2D();
     resolver.AddSoftmax();
     resolver.AddReshape();
+    resolver.AddQuantize();
+    resolver.AddDequantize();
     resolver.AddFullyConnected();
 
     // Create a MicroErrorReporter instance for error reporting
@@ -188,22 +177,20 @@ void setup() {
     model_input = interpreter->input(0);
     model_output = interpreter->output(0);
 
-    // Verify input/output tensor types for quantized model
-    if (model_input->type != kTfLiteInt8 || model_output->type != kTfLiteInt8) {
-        MicroPrintf("Input/Output tensor types are not INT8. Expected a quantized model.");
+    // Ensure the input/output tensor types are FLOAT32, even though weights are float16
+    if (model_input->type != kTfLiteFloat32 || model_output->type != kTfLiteFloat32) {
+        MicroPrintf("Input/Output tensor types are not FLOAT32. Expected a float16-weight model with float I/O.");
         while (1);
     }
 
-    MicroPrintf("TensorFlow Lite Micro initialized successfully!");
+    MicroPrintf("TensorFlow Lite Micro (QAT Float16 Model) initialized successfully!");
     MicroPrintf("Input tensor bytes: %d", model_input->bytes);
     MicroPrintf("Output tensor bytes: %d", model_output->bytes);
-    MicroPrintf("Input Quant: scale=%.6f, zero_point=%d", (double) model_input->params.scale,
-                model_input->params.zero_point);
-    MicroPrintf("Output Quant: scale=%.6f, zero_point=%d", (double) model_output->params.scale,
-                model_output->params.zero_point);
+    MicroPrintf("Arena Used: %d bytes", interpreter->arena_used_bytes()); // Actual memory used by interpreter
+    MicroPrintf("Free Heap after setup: %d bytes", ESP.getFreeHeap()); // Monitor remaining heap
 
     scribbling = true;
-    std::fill_n(model_input->data.int8, 28 * 28, -128);
+    std::fill_n(model_input->data.f, 28 * 28, 0.0f);
 }
 
 double toDegrees(const _absData *absData) {
@@ -328,13 +315,15 @@ void loop() {
             inSession = true;
             if (scribbling) {
                 scaleData(&touchData, 28, 28);
-                // Draw a 2x2 stroke centered at the touch point
-                for (int dx = -1; dx <= 0; ++dx) {
-                    for (int dy = -1; dy <= 0; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    for (int dy = -1; dy <= 1; ++dy) {
                         int x = touchData.xValue + dx;
                         int y = touchData.yValue + dy;
                         if (x >= 0 && x < 28 && y >= 0 && y < 28) {
-                            model_input->data.int8[x + y * 28] = 127;
+                            float currentValue = model_input->data.f[x + y * 28];
+                            if (currentValue < 1.0f) {
+                                model_input->data.f[x + y * 28] = dx == 0 ? 1.0f : 0.8f;
+                            }
                         }
                     }
                 }
@@ -384,17 +373,20 @@ void loop() {
         if (scribbling) {
             int x = 0;
             for (int i = 0; i < 28 * 28; i++) {
-                Serial.printf("%04d,", model_input->data.int8[i]);
+                float val = model_input->data.f[i];
+                if (val < 0.5) {
+                    Serial.print(".");
+                } else if (val == 1.0f) {
+                    Serial.print("#");
+                } else {
+                    Serial.print("|");
+                }
                 if (x++ > 26) {
                     Serial.println();
                     x = 0;
                 }
             }
             Serial.println();
-
-            // --- Input Data (Copy your preprocessed, quantized image into the input tensor) ---
-            // The dummy_input_image is already int8 and sized correctly (28x28x1).
-            //memcpy(model_input->data.int8, dummy_input_image, sizeof(dummy_input_image));
 
             // --- Run Inference ---
             TfLiteStatus invoke_status = interpreter->Invoke();
@@ -403,41 +395,23 @@ void loop() {
                 return;
             }
 
-            // --- Get Output and Dequantize ---
-            // The output tensor holds quantized int8 values. We need to dequantize them.
-            // Dequantization formula: float_value = (quantized_value - zero_point) * scale
-            float output_values[kModelOutputClasses];
-            auto* output_data = tflite::GetTensorData<int8_t>(model_output); // Correct way to get data pointer
-
-            float output_scale = model_output->params.scale;
-            int32_t output_zero_point = model_output->params.zero_point;
-
-            for (int i = 0; i < kModelOutputClasses; ++i) {
-                output_values[i] = (output_data[i] - output_zero_point) * output_scale;
-            }
+            // --- Get Output (Directly read float values) ---
+            auto *output_data = tflite::GetTensorData<float>(model_output); // Get float data pointer
 
             // --- Find the Predicted Class ---
             int max_index = -1;
             float max_value = -1e9; // A very small number
 
             for (int i = 0; i < kModelOutputClasses; ++i) {
-                if (output_values[i] > max_value) {
-                    max_value = output_values[i];
+                if (output_data[i] > max_value) {
+                    max_value = output_data[i];
                     max_index = i;
                 }
             }
 
             // --- Print Results ---
             MicroPrintf("Prediction: %s", kCategoryLabels[max_index]);
-            MicroPrintf("Confidence: %f", static_cast<double>(max_value));
-
-            // Optional: Print all probabilities for debugging
-            MicroPrintf("Probabilities:");
-            for (int i = 0; i < kModelOutputClasses; ++i) {
-                MicroPrintf("  %s: %f", kCategoryLabels[i], (double)output_values[i]);
-            }
-
-
+            MicroPrintf("Confidence: %d", static_cast<double>(max_value));
         } else {
             if (gestureTouchSamples > 3 && gestureTouchSamples < 20 && !gestureSent) {
                 if (touchDowns <= 5) {
@@ -465,7 +439,7 @@ void loop() {
         currentGesture = G_NONE;
         gestureSent = false;
         lastSessionEndTime = std::chrono::milliseconds(millis());
-        std::fill_n(model_input->data.int8, 28 * 28, -128);
+        std::fill_n(model_input->data.f, 28 * 28, 0.0f);
     }
 
     if (Serial1.available()) {
