@@ -13,7 +13,7 @@
 #include <tensorflow/lite/micro/system_setup.h>
 #include <tensorflow/lite/schema/schema_generated.h>
 #include <tensorflow/lite/micro/micro_mutable_op_resolver.h> // If using a custom resolver
-#include "model.h"
+#include "emnist_uppercase_qat_model.h"
 
 #include <map>
 
@@ -154,16 +154,19 @@ void setup() {
 
     digitalWrite(BT_CONNECTED_PIN, LOW);
 
-    model = tflite::GetModel(emnist_uppercase_quant_model_tflite);
+    model = tflite::GetModel(emnist_uppercase_qat_model_tflite);
     if (model->version() != TFLITE_SCHEMA_VERSION) {
         MicroPrintf("Model schema mismatch! Expected %d, got %d",
                     TFLITE_SCHEMA_VERSION, model->version());
         while (1);
     }
 
-    // Using AllOpsResolver for simplicity. For smaller footprints, use MicroMutableOpResolver
-    // and explicitly add operations present in your model (e.g., AddConv2D, AddMaxPool2D).
-    static tflite::AllOpsResolver resolver;
+    static tflite::MicroMutableOpResolver<5> resolver;
+    resolver.AddConv2D();
+    resolver.AddMaxPool2D();
+    resolver.AddSoftmax();
+    resolver.AddReshape();
+    resolver.AddFullyConnected();
 
     // Create a MicroErrorReporter instance for error reporting
     static tflite::MicroErrorReporter micro_error_reporter;
@@ -376,7 +379,7 @@ void loop() {
             }
             lastMovementTime = std::chrono::milliseconds(millis());
         }
-    } else if (inSession && millis() - lastMovementTime.count() > 2000) {
+    } else if (inSession && millis() - lastMovementTime.count() > 500) {
         inSession = false;
         if (scribbling) {
             int x = 0;
@@ -404,7 +407,7 @@ void loop() {
             // The output tensor holds quantized int8 values. We need to dequantize them.
             // Dequantization formula: float_value = (quantized_value - zero_point) * scale
             float output_values[kModelOutputClasses];
-            int8_t* output_data = tflite::GetTensorData<int8_t>(model_output); // Correct way to get data pointer
+            auto* output_data = tflite::GetTensorData<int8_t>(model_output); // Correct way to get data pointer
 
             float output_scale = model_output->params.scale;
             int32_t output_zero_point = model_output->params.zero_point;
@@ -426,13 +429,13 @@ void loop() {
 
             // --- Print Results ---
             MicroPrintf("Prediction: %s", kCategoryLabels[max_index]);
-            MicroPrintf("Confidence: %.4f", (double)max_value); // Use (double) for MicroPrintf with float
+            MicroPrintf("Confidence: %f", static_cast<double>(max_value));
 
             // Optional: Print all probabilities for debugging
-            // MicroPrintf("Probabilities:");
-            // for (int i = 0; i < kModelOutputClasses; ++i) {
-            //     MicroPrintf("  %s: %.4f", kCategoryLabels[i], (double)output_values[i]);
-            // }
+            MicroPrintf("Probabilities:");
+            for (int i = 0; i < kModelOutputClasses; ++i) {
+                MicroPrintf("  %s: %f", kCategoryLabels[i], (double)output_values[i]);
+            }
 
 
         } else {
