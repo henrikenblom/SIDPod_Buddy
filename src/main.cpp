@@ -38,7 +38,10 @@ const char *kCategoryLabels[] = {
     "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"
 };
 
-uint16_t lastX, lastY = 0;
+uint16_t lastX, lastY, firstX, firstY, maxX, maxY = 0;
+uint16_t minX = 1000;
+uint16_t minY = 1000;
+int minZValue = 4;
 bool inSession, lastAccumulatedDeltaGTZero, gestureSent, scribbling = false;
 Gesture currentGesture, forcedGesture = G_NONE;
 std::chrono::milliseconds lastMovementTime, lastStepUpdateTime, lastSessionEndTime, lastDeviceValidation;
@@ -311,14 +314,15 @@ void loop() {
         if (!touchData.touchDown) {
             touchDowns++;
         }
-        if (touchData.zValue > 5) {
+        if (touchData.zValue > 4) {
             inSession = true;
             if (scribbling) {
-                scaleData(&touchData, 28, 28);
+                absData_t scribbleData = touchData;
+                scaleData(&scribbleData, 28, 28);
                 for (int dx = -1; dx <= 1; ++dx) {
                     for (int dy = -1; dy <= 1; ++dy) {
-                        int x = touchData.xValue + dx;
-                        int y = touchData.yValue + dy;
+                        int x = scribbleData.xValue + dx;
+                        int y = scribbleData.yValue + dy;
                         if (x >= 0 && x < 28 && y >= 0 && y < 28) {
                             float currentValue = model_input->data.f[x + y * 28];
                             if (currentValue < 1.0f) {
@@ -327,67 +331,106 @@ void loop() {
                         }
                     }
                 }
-            } else {
+            }
+            if (touchData.zValue > 20) {
                 scaleData(&touchData, 1000, 1000);
-                if (historyVector.size() > 5 && currentGesture == G_NONE) {
-                    currentGesture = identifyGesture(historyVector);
-                    currentStepSize = getStepSizeForCurrentGesture();
-                }
-                if ((touchData.xValue || touchData.yValue)
-                    && (lastX != touchData.xValue || lastY != touchData.yValue)) {
-                    const double degrees = toDegrees(&touchData);
-                    if (gestureTouchSamples > 6 && currentGesture == G_NONE) {
-                        historyVector.push_back({
-                            touchData.xValue,
-                            touchData.yValue,
-                            degrees
-                        });
+                if (!scribbling) {
+                    if (historyVector.size() > 5 && currentGesture == G_NONE) {
+                        currentGesture = identifyGesture(historyVector);
+                        currentStepSize = getStepSizeForCurrentGesture();
                     }
-                    if (currentGesture == G_HORIZONTAL) {
-                        accumulatedDelta += getHorizontalDelta(&touchData);
-                    } else if (currentGesture == G_VERTICAL) {
-                        accumulatedDelta -= getVerticalDelta(&touchData);
-                    } else if (currentGesture == G_ROTATE) {
-                        accumulatedDelta += getRotationalDelta(degrees);
+                    if ((touchData.xValue || touchData.yValue)
+                        && (lastX != touchData.xValue || lastY != touchData.yValue)) {
+                        const double degrees = toDegrees(&touchData);
+                        if (gestureTouchSamples > 6 && currentGesture == G_NONE) {
+                            historyVector.push_back({
+                                touchData.xValue,
+                                touchData.yValue,
+                                degrees
+                            });
+                        }
+                        if (currentGesture == G_HORIZONTAL) {
+                            accumulatedDelta += getHorizontalDelta(&touchData);
+                        } else if (currentGesture == G_VERTICAL) {
+                            accumulatedDelta -= getVerticalDelta(&touchData);
+                        } else if (currentGesture == G_ROTATE) {
+                            accumulatedDelta += getRotationalDelta(degrees);
+                        }
+                        lastDegrees = degrees;
                     }
-                    lastDegrees = degrees;
-                }
-                lastX = touchData.xValue;
-                lastY = touchData.yValue;
-                if (accumulatedDelta > currentStepSize || accumulatedDelta < currentStepSize * -1) {
-                    lastAccumulatedDeltaGTZero = accumulatedDelta > 0;
-                    sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
-                    accumulatedDelta = 0;
-                    lastStepUpdateTime = std::chrono::milliseconds(millis());
-                } else if (currentGesture == G_VERTICAL
-                           && millis() - lastStepUpdateTime.count() > 350
-                           && (lastY > 800 || lastY < 200)) {
-                    sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
+                    if (accumulatedDelta > currentStepSize || accumulatedDelta < currentStepSize * -1) {
+                        lastAccumulatedDeltaGTZero = accumulatedDelta > 0;
+                        sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
+                        accumulatedDelta = 0;
+                        lastStepUpdateTime = std::chrono::milliseconds(millis());
+                    } else if (currentGesture == G_VERTICAL
+                               && millis() - lastStepUpdateTime.count() > 350
+                               && (lastY > 800 || lastY < 200)) {
+                        sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
+                    }
                 }
                 gestureTouchSamples++;
+                maxX= std::max(maxX, touchData.xValue);
+                minX = std::min(minX, touchData.xValue);
+                maxY = std::max(maxY, touchData.yValue);
+                minY = std::min(minY, touchData.yValue);
+                lastX = touchData.xValue;
+                lastY = touchData.yValue;
+                if (!firstX) {
+                    firstX = lastX;
+                }
             }
             lastMovementTime = std::chrono::milliseconds(millis());
         }
     } else if (inSession && millis() - lastMovementTime.count() > 500) {
-        inSession = false;
-        if (scribbling) {
-            int x = 0;
-            for (int i = 0; i < 28 * 28; i++) {
-                float val = model_input->data.f[i];
-                if (val < 0.5) {
-                    Serial.print(".");
-                } else if (val == 1.0f) {
-                    Serial.print("#");
-                } else {
-                    Serial.print("|");
-                }
-                if (x++ > 26) {
-                    Serial.println();
-                    x = 0;
-                }
+        int x = 0;
+        for (int i = 0; i < 28 * 28; i++) {
+            float val = model_input->data.f[i];
+            if (val < 0.5) {
+                Serial.print(".");
+            } else if (val == 1.0f) {
+                Serial.print("#");
+            } else {
+                Serial.print("|");
             }
-            Serial.println();
-
+            if (x++ > 26) {
+                Serial.println();
+                x = 0;
+            }
+        }
+        Serial.println("gestureTouchSamples: " + String(gestureTouchSamples));
+        inSession = false;
+        uint16_t deltaX = maxX - minX;
+        uint16_t deltaY = maxY - minY;
+        Serial.println("deltaX: " + String(deltaX));
+        Serial.println("deltaY: " + String(deltaY));
+        if (gestureTouchSamples >= 10 && deltaX >= 200 && deltaY <= 200) {
+            if (lastX > firstX) {
+                Serial.println("SPACE");
+            } else {
+                Serial.println("BACKSPACE");
+            }
+        } else if (deltaY < 200 && gestureTouchSamples > 3 && gestureTouchSamples < 20 && !gestureSent) {
+            if (touchDowns <= 5) {
+                Serial.println("Tap");
+                sendGesture(G_TAP);
+            } else if (lastY < 333) {
+                Serial.println("North");
+                sendGesture(G_NORTH);
+            } else if (lastY > 666) {
+                Serial.println("South");
+                sendGesture(G_SOUTH);
+            } else if (lastX < 333) {
+                Serial.println("West");
+                sendGesture(G_WEST);
+            } else if (lastX > 666) {
+                Serial.println("East");
+                sendGesture(G_EAST);
+            } else {
+                Serial.println("Double tap");
+                sendGesture(G_DOUBLE_TAP);
+            }
+        } else if (scribbling) {
             // --- Run Inference ---
             TfLiteStatus invoke_status = interpreter->Invoke();
             if (invoke_status != kTfLiteOk) {
@@ -409,31 +452,25 @@ void loop() {
                 }
             }
 
-            // --- Print Results ---
-            MicroPrintf("Prediction: %s", kCategoryLabels[max_index]);
-            MicroPrintf("Confidence: %d", static_cast<double>(max_value));
-        } else {
-            if (gestureTouchSamples > 3 && gestureTouchSamples < 20 && !gestureSent) {
-                if (touchDowns <= 5) {
-                    sendGesture(G_TAP);
-                } else if (lastY < 333) {
-                    sendGesture(G_NORTH);
-                } else if (lastY > 666) {
-                    sendGesture(G_SOUTH);
-                } else if (lastX < 333) {
-                    sendGesture(G_WEST);
-                } else if (lastX > 666) {
-                    sendGesture(G_EAST);
-                } else {
-                    sendGesture(G_DOUBLE_TAP);
-                }
+            if (max_value > 0.6f) {
+                MicroPrintf("Prediction: %s", kCategoryLabels[max_index]);
+            } else {
+                MicroPrintf("Failed to recognize character, confidence too low.");
             }
+            Serial.print("Confidence: ");
+            Serial.println(max_value);
         }
         accumulatedDelta = 0;
         gestureTouchSamples = 0;
         touchDowns = 0;
         lastY = 0;
         lastX = 0;
+        firstX = 0;
+        firstY = 0;
+        maxX = 0;
+        maxY = 0;
+        minX = 1000;
+        minY = 1000;
         lastDegrees = 0;
         historyVector.clear();
         currentGesture = G_NONE;
