@@ -308,6 +308,24 @@ void getCurrentDeviceAddress(esp_bd_addr_t addr) {
     std::copy(addressArray.begin(), addressArray.end(), addr);
 }
 
+void outputModelInputAsASCIIArt() {
+    int x = 0;
+    for (int i = 0; i < 28 * 28; i++) {
+        float val = model_input->data.f[i];
+        if (val < 0.5) {
+            Serial.print(".");
+        } else if (val == 1.0f) {
+            Serial.print("#");
+        } else {
+            Serial.print("|");
+        }
+        if (x++ > 26) {
+            Serial.println();
+            x = 0;
+        }
+    }
+}
+
 void loop() {
     if (millis() - lastSessionEndTime.count() > 100 && drAsserted()) {
         pinnacleGetAbsolute(&touchData);
@@ -382,28 +400,14 @@ void loop() {
             }
             lastMovementTime = std::chrono::milliseconds(millis());
         }
-    } else if (inSession && millis() - lastMovementTime.count() > 500) {
-        int x = 0;
-        for (int i = 0; i < 28 * 28; i++) {
-            float val = model_input->data.f[i];
-            if (val < 0.5) {
-                Serial.print(".");
-            } else if (val == 1.0f) {
-                Serial.print("#");
-            } else {
-                Serial.print("|");
-            }
-            if (x++ > 26) {
-                Serial.println();
-                x = 0;
-            }
-        }
+    } else if (inSession && millis() - lastMovementTime.count() > 400) {
         Serial.println("gestureTouchSamples: " + String(gestureTouchSamples));
         inSession = false;
         uint16_t deltaX = maxX - minX;
         uint16_t deltaY = maxY - minY;
         Serial.println("deltaX: " + String(deltaX));
         Serial.println("deltaY: " + String(deltaY));
+        outputModelInputAsASCIIArt();
         if (gestureTouchSamples >= 10 && deltaX >= 200 && deltaY <= 200) {
             if (lastX > firstX) {
                 Serial.println("SPACE");
@@ -452,7 +456,7 @@ void loop() {
                 }
             }
 
-            if (max_value > 0.6f) {
+            if (max_value > 0.55f) {
                 MicroPrintf("Prediction: %s", kCategoryLabels[max_index]);
             } else {
                 MicroPrintf("Failed to recognize character, confidence too low.");
