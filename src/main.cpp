@@ -7,13 +7,42 @@
 #include "TM0XX0XX.h"
 #include "main.h"
 
+#include <TensorFlowLite_ESP32.h>
+#include <tensorflow/lite/micro/micro_interpreter.h>
+#include <tensorflow/lite/schema/schema_generated.h>
+#include <tensorflow/lite/micro/micro_mutable_op_resolver.h>
+#include "emnist_uppercase_model_qat_float16.h"
+
 #include <map>
 
-uint16_t lastX, lastY = 0;
-bool inSession, lastAccumulatedDeltaGTZero, gestureSent = false;
+#include "tensorflow/lite/micro/micro_error_reporter.h"
+
+const int kModelInputWidth = 28;
+const int kModelInputHeight = 28;
+const int kModelInputChannels = 1;
+const int kModelOutputClasses = 26;
+
+const int kTensorArenaSize = 20 * 1024;
+uint8_t tensor_arena[kTensorArenaSize];
+
+tflite::MicroInterpreter *interpreter = nullptr;
+TfLiteTensor *model_input = nullptr;
+TfLiteTensor *model_output = nullptr;
+const tflite::Model *model = nullptr;
+
+const char *kCategoryLabels[] = {
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+    "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"
+};
+
+uint16_t lastX, lastY, firstX, firstY, maxX, maxY = 0;
+uint16_t minX = 1000;
+uint16_t minY = 1000;
+int minZValue = 4;
+bool inSession, lastAccumulatedDeltaGTZero, gestureSent, scribbling = false;
 Gesture currentGesture, forcedGesture = G_NONE;
 std::chrono::milliseconds lastMovementTime, lastStepUpdateTime, lastSessionEndTime, lastDeviceValidation;
-int touchSamples, touchDowns, currentStepSize, connectionAttempts = 0;
+int gestureTouchSamples, touchDowns, currentStepSize, connectionAttempts = 0;
 std::vector<_historyData> historyVector;
 std::map<std::string, std::array<uint8_t, 6> > btDevices;
 double accumulatedDelta, lastDegrees = 0;
@@ -89,17 +118,17 @@ void setupPins() {
 }
 
 void setup() {
-    setCpuFrequencyMhz(80);
+    setCpuFrequencyMhz(240);
     Serial.begin(115200);
-    Serial1.begin(115200);
+    Serial1.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
     setupPins();
 
     auto cfg = i2s.defaultConfig(RX_MODE);
     cfg.i2s_format = I2S_STD_FORMAT;
     cfg.is_master = false;
-    cfg.pin_bck = 26;
-    cfg.pin_ws = 27;
-    cfg.pin_data = 32;
+    cfg.pin_bck = I2S_BCK_PIN;
+    cfg.pin_ws = I2S_WS_PIN;
+    cfg.pin_data = I2S_DATA_PIN;
     cfg.set(info44k1);
     i2s.begin(cfg);
 
@@ -111,6 +140,56 @@ void setup() {
     a2dp_source.start();
 
     digitalWrite(BT_CONNECTED_PIN, LOW);
+
+    model = tflite::GetModel(emnist_uppercase_model_qat_float16);
+    if (model->version() != TFLITE_SCHEMA_VERSION) {
+        MicroPrintf("Model schema mismatch! Expected %d, got %d",
+                    TFLITE_SCHEMA_VERSION, model->version());
+        while (1);
+    }
+
+    static tflite::MicroMutableOpResolver<7> resolver;
+    resolver.AddConv2D();
+    resolver.AddMaxPool2D();
+    resolver.AddSoftmax();
+    resolver.AddReshape();
+    resolver.AddQuantize();
+    resolver.AddDequantize();
+    resolver.AddFullyConnected();
+
+    // Create a MicroErrorReporter instance for error reporting
+    static tflite::MicroErrorReporter micro_error_reporter;
+    tflite::ErrorReporter *error_reporter = &micro_error_reporter;
+
+    // Build an interpreter to run the model with.
+    static tflite::MicroInterpreter static_interpreter(model, resolver, tensor_arena, kTensorArenaSize, error_reporter);
+    interpreter = &static_interpreter;
+
+    // Allocate tensors from the provided arena.
+    TfLiteStatus allocate_status = interpreter->AllocateTensors();
+    if (allocate_status != kTfLiteOk) {
+        MicroPrintf("AllocateTensors() failed! Required: %d bytes, Provided: %d bytes",
+                    interpreter->arena_used_bytes(), kTensorArenaSize);
+        while (1);
+    }
+
+    // Get information about the model's input and output tensors.
+    model_input = interpreter->input(0);
+    model_output = interpreter->output(0);
+
+    // Ensure the input/output tensor types are FLOAT32, even though weights are float16
+    if (model_input->type != kTfLiteFloat32 || model_output->type != kTfLiteFloat32) {
+        MicroPrintf("Input/Output tensor types are not FLOAT32. Expected a float16-weight model with float I/O.");
+        while (1);
+    }
+
+    MicroPrintf("TensorFlow Lite Micro (QAT Float16 Model) initialized successfully!");
+    MicroPrintf("Input tensor bytes: %d", model_input->bytes);
+    MicroPrintf("Output tensor bytes: %d", model_output->bytes);
+    MicroPrintf("Arena Used: %d bytes", interpreter->arena_used_bytes()); // Actual memory used by interpreter
+    MicroPrintf("Free Heap after setup: %d bytes", ESP.getFreeHeap()); // Monitor remaining heap
+
+    std::fill_n(model_input->data.f, 28 * 28, 0.0f);
 }
 
 double toDegrees(const _absData *absData) {
@@ -175,7 +254,7 @@ Gesture identifyGesture(const std::vector<_historyData> &historyVector) {
     return G_VERTICAL;
 }
 
-const char* getNotificationTypeName(NotificationType type) {
+const char *getNotificationTypeName(NotificationType type) {
     switch (type) {
         case NT_NONE: return "NT_NONE";
         case NT_GESTURE: return "NT_GESTURE";
@@ -225,80 +304,202 @@ void getCurrentDeviceAddress(esp_bd_addr_t addr) {
     std::copy(addressArray.begin(), addressArray.end(), addr);
 }
 
+void outputModelInputAsASCIIArt() {
+    int x = 0;
+    for (int i = 0; i < 28 * 28; i++) {
+        float val = model_input->data.f[i];
+        if (val < 0.5) {
+            Serial.print(".");
+        } else if (val == 1.0f) {
+            Serial.print("#");
+        } else {
+            Serial.print("|");
+        }
+        if (x++ > 26) {
+            Serial.println();
+            x = 0;
+        }
+    }
+}
+
+void sendScribbleInput(const uint16_t x, const uint16_t y) {
+    Serial1.write(NT_SCRIBBLE_INPUT);
+    Serial1.write(static_cast<char>(x));
+    Serial1.write(static_cast<char>(y));
+    Serial1.flush();
+}
+
+void sendCharacter(const char *character) {
+    Serial1.write(NT_CHARACTER_DETECTED);
+    Serial1.write(character, 1);
+    Serial1.flush();
+}
+
+void sendBackspace() {
+    Serial1.write(NT_BACKSPACE_DETECTED);
+    Serial1.flush();
+}
+
+void sendSpace() {
+    Serial1.write(NT_SPACE_DETECTED);
+    Serial1.flush();
+}
+
 void loop() {
     if (millis() - lastSessionEndTime.count() > 100 && drAsserted()) {
         pinnacleGetAbsolute(&touchData);
         if (!touchData.touchDown) {
             touchDowns++;
         }
-        if (touchData.zValue > 20) {
+        if (touchData.zValue > 4) {
             inSession = true;
-            scaleData(&touchData, 1000, 1000);
-            if (historyVector.size() > 5 && currentGesture == G_NONE) {
-                currentGesture = identifyGesture(historyVector);
-                currentStepSize = getStepSizeForCurrentGesture();
-            }
-            if ((touchData.xValue || touchData.yValue)
-                && (lastX != touchData.xValue || lastY != touchData.yValue)) {
-                const double degrees = toDegrees(&touchData);
-                if (touchSamples > 6 && currentGesture == G_NONE) {
-                    historyVector.push_back({
-                        touchData.xValue,
-                        touchData.yValue,
-                        degrees
-                    });
+            if (scribbling) {
+                absData_t scribbleData = touchData;
+                scaleData(&scribbleData, 28, 28);
+                for (int dx = -1; dx <= 1; ++dx) {
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        int x = scribbleData.xValue + dx;
+                        int y = scribbleData.yValue + dy;
+                        if (x >= 0 && x < 28 && y >= 0 && y < 28) {
+                            float currentValue = model_input->data.f[x + y * 28];
+                            if (currentValue < 1.0f) {
+                                model_input->data.f[x + y * 28] = dx == 0 ? 1.0f : 0.8f;
+                            }
+                        }
+                    }
                 }
-                if (currentGesture == G_HORIZONTAL) {
-                    accumulatedDelta += getHorizontalDelta(&touchData);
-                } else if (currentGesture == G_VERTICAL) {
-                    accumulatedDelta -= getVerticalDelta(&touchData);
-                } else if (currentGesture == G_ROTATE) {
-                    accumulatedDelta += getRotationalDelta(degrees);
+                if (gestureTouchSamples >= 10) {
+                    sendScribbleInput(scribbleData.xValue, scribbleData.yValue);
                 }
-                lastDegrees = degrees;
             }
-            lastX = touchData.xValue;
-            lastY = touchData.yValue;
+            if (touchData.zValue > 20) {
+                scaleData(&touchData, 1000, 1000);
+                if (!scribbling) {
+                    if (historyVector.size() > 5 && currentGesture == G_NONE) {
+                        currentGesture = identifyGesture(historyVector);
+                        currentStepSize = getStepSizeForCurrentGesture();
+                    }
+                    if ((touchData.xValue || touchData.yValue)
+                        && (lastX != touchData.xValue || lastY != touchData.yValue)) {
+                        const double degrees = toDegrees(&touchData);
+                        if (gestureTouchSamples > 6 && currentGesture == G_NONE) {
+                            historyVector.push_back({
+                                touchData.xValue,
+                                touchData.yValue,
+                                degrees
+                            });
+                        }
+                        if (currentGesture == G_HORIZONTAL) {
+                            accumulatedDelta += getHorizontalDelta(&touchData);
+                        } else if (currentGesture == G_VERTICAL) {
+                            accumulatedDelta -= getVerticalDelta(&touchData);
+                        } else if (currentGesture == G_ROTATE) {
+                            accumulatedDelta += getRotationalDelta(degrees);
+                        }
+                        lastDegrees = degrees;
+                    }
+                    if (accumulatedDelta > currentStepSize || accumulatedDelta < currentStepSize * -1) {
+                        lastAccumulatedDeltaGTZero = accumulatedDelta > 0;
+                        sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
+                        accumulatedDelta = 0;
+                        lastStepUpdateTime = std::chrono::milliseconds(millis());
+                    } else if (currentGesture == G_VERTICAL
+                               && millis() - lastStepUpdateTime.count() > 350
+                               && (lastY > 800 || lastY < 200)) {
+                        sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
+                    }
+                }
+                gestureTouchSamples++;
+                maxX = std::max(maxX, touchData.xValue);
+                minX = std::min(minX, touchData.xValue);
+                maxY = std::max(maxY, touchData.yValue);
+                minY = std::min(minY, touchData.yValue);
+                lastX = touchData.xValue;
+                lastY = touchData.yValue;
+                if (!firstX) {
+                    firstX = lastX;
+                }
+            }
             lastMovementTime = std::chrono::milliseconds(millis());
-            if (accumulatedDelta > currentStepSize || accumulatedDelta < currentStepSize * -1) {
-                lastAccumulatedDeltaGTZero = accumulatedDelta > 0;
-                sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
-                accumulatedDelta = 0;
-                lastStepUpdateTime = std::chrono::milliseconds(millis());
-            } else if (currentGesture == G_VERTICAL
-                       && millis() - lastStepUpdateTime.count() > 350
-                       && (lastY > 800 || lastY < 200)) {
-                sendGesture(currentGesture, lastAccumulatedDeltaGTZero);
-            }
-            touchSamples++;
         }
-    } else if (inSession && millis() - lastMovementTime.count() > 180) {
+    } else if (inSession && millis() - lastMovementTime.count() > (scribbling ? 500 : 180)) {
         inSession = false;
-        if (touchSamples > 3 && touchSamples < 20 && !gestureSent) {
+        const uint16_t deltaX = maxX - minX;
+        const uint16_t deltaY = maxY - minY;
+        if (gestureTouchSamples >= 10 && deltaX >= 200 && deltaY <= 200) {
+            if (lastX > firstX) {
+                sendSpace();
+            } else {
+                sendBackspace();
+            }
+        } else if (deltaY < 200 && gestureTouchSamples > 3 && gestureTouchSamples < 20 && !gestureSent) {
             if (touchDowns <= 5) {
+                Serial.println("Tap");
                 sendGesture(G_TAP);
             } else if (lastY < 333) {
+                Serial.println("North");
                 sendGesture(G_NORTH);
             } else if (lastY > 666) {
+                Serial.println("South");
                 sendGesture(G_SOUTH);
             } else if (lastX < 333) {
+                Serial.println("West");
                 sendGesture(G_WEST);
             } else if (lastX > 666) {
+                Serial.println("East");
                 sendGesture(G_EAST);
             } else {
+                Serial.println("Double tap");
                 sendGesture(G_DOUBLE_TAP);
             }
+        } else if (scribbling) {
+            // --- Run Inference ---
+            TfLiteStatus invoke_status = interpreter->Invoke();
+            if (invoke_status != kTfLiteOk) {
+                MicroPrintf("Invoke failed!");
+                return;
+            }
+
+            // --- Get Output (Directly read float values) ---
+            auto *output_data = tflite::GetTensorData<float>(model_output); // Get float data pointer
+
+            // --- Find the Predicted Class ---
+            int max_index = -1;
+            float max_value = -1e9; // A very small number
+
+            for (int i = 0; i < kModelOutputClasses; ++i) {
+                if (output_data[i] > max_value) {
+                    max_value = output_data[i];
+                    max_index = i;
+                }
+            }
+
+            if (max_value > 0.55f) {
+                MicroPrintf("Prediction: %s", kCategoryLabels[max_index]);
+                sendCharacter(kCategoryLabels[max_index]);
+            } else {
+                MicroPrintf("Failed to recognize character, confidence too low.");
+            }
+            Serial.print("Confidence: ");
+            Serial.println(max_value);
         }
         accumulatedDelta = 0;
-        touchSamples = 0;
+        gestureTouchSamples = 0;
         touchDowns = 0;
         lastY = 0;
         lastX = 0;
+        firstX = 0;
+        firstY = 0;
+        maxX = 0;
+        maxY = 0;
+        minX = 1000;
+        minY = 1000;
         lastDegrees = 0;
         historyVector.clear();
         currentGesture = G_NONE;
         gestureSent = false;
         lastSessionEndTime = std::chrono::milliseconds(millis());
+        std::fill_n(model_input->data.f, 28 * 28, 0.0f);
     }
 
     if (Serial1.available()) {
@@ -326,14 +527,21 @@ void loop() {
         } else if (type == static_cast<char>(RT_G_FORCE_ROTATE)) {
             Serial.println("RT_G_FORCE_ROTATE");
             forcedGesture = G_ROTATE;
+            scribbling = false;
         } else if (type == static_cast<char>(RT_G_FORCE_VERTICAL)) {
             Serial.println("RT_G_FORCE_VERTICAL");
             forcedGesture = G_VERTICAL;
+            scribbling = false;
         } else if (type == static_cast<char>(RT_G_FORCE_HORIZONTAL)) {
             forcedGesture = G_HORIZONTAL;
+            scribbling = false;
         } else if (type == static_cast<char>(RT_G_SET_AUTO)) {
             Serial.println("RT_G_SET_AUTO");
             forcedGesture = G_NONE;
+            scribbling = false;
+        } else if (type == static_cast<char>(RT_SCRIBBLE)) {
+            Serial.println("RT_SCRIBBLE");
+            scribbling = true;
         }
     }
 
