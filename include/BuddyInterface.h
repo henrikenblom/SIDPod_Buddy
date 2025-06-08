@@ -5,7 +5,12 @@
 #ifndef BUDDYINTERFACE_H
 #define BUDDYINTERFACE_H
 
-#define BT_CONNECTED_PIN         4
+#define BT_CONNECTED_PIN            4
+#define RX_PIN                      25
+#define TX_PIN                      33
+#define I2S_BCK_PIN                 35
+#define I2S_WS_PIN                  34
+#define I2S_DATA_PIN                32
 
 enum RequestType {
     RT_NONE = 0,
@@ -17,6 +22,7 @@ enum RequestType {
     RT_G_FORCE_HORIZONTAL = 6,
     RT_G_SET_AUTO = 7,
     RT_BT_GET_CONNECTED = 8,
+    RT_SCRIBBLE = 9,
 };
 
 enum NotificationType {
@@ -26,6 +32,10 @@ enum NotificationType {
     NT_BT_DISCONNECTED = 3,
     NT_BT_DEVICE_LIST_CHANGED = 4,
     NT_BT_CONNECTING = 5,
+    NT_SCRIBBLE_INPUT = 6,
+    NT_CHARACTER_DETECTED = 7,
+    NT_BACKSPACE_DETECTED = 8,
+    NT_SPACE_DETECTED = 9,
 };
 
 enum Gesture {

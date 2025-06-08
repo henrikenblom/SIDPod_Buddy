@@ -17,22 +17,19 @@
 
 #include "tensorflow/lite/micro/micro_error_reporter.h"
 
-// Constants for the model
 const int kModelInputWidth = 28;
 const int kModelInputHeight = 28;
 const int kModelInputChannels = 1;
 const int kModelOutputClasses = 26;
 
-const int kTensorArenaSize = 24 * 1024;
+const int kTensorArenaSize = 20 * 1024;
 uint8_t tensor_arena[kTensorArenaSize];
 
-// Pointers to the model, interpreter, and tensors
 tflite::MicroInterpreter *interpreter = nullptr;
 TfLiteTensor *model_input = nullptr;
 TfLiteTensor *model_output = nullptr;
 const tflite::Model *model = nullptr;
 
-// Our labels (A-Z)
 const char *kCategoryLabels[] = {
     "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
     "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"
@@ -123,15 +120,15 @@ void setupPins() {
 void setup() {
     setCpuFrequencyMhz(240);
     Serial.begin(115200);
-    Serial1.begin(115200);
+    Serial1.begin(115200, SERIAL_8N1, RX_PIN, TX_PIN);
     setupPins();
 
     auto cfg = i2s.defaultConfig(RX_MODE);
     cfg.i2s_format = I2S_STD_FORMAT;
     cfg.is_master = false;
-    cfg.pin_bck = 26;
-    cfg.pin_ws = 27;
-    cfg.pin_data = 32;
+    cfg.pin_bck = I2S_BCK_PIN;
+    cfg.pin_ws = I2S_WS_PIN;
+    cfg.pin_data = I2S_DATA_PIN;
     cfg.set(info44k1);
     i2s.begin(cfg);
 
@@ -192,7 +189,6 @@ void setup() {
     MicroPrintf("Arena Used: %d bytes", interpreter->arena_used_bytes()); // Actual memory used by interpreter
     MicroPrintf("Free Heap after setup: %d bytes", ESP.getFreeHeap()); // Monitor remaining heap
 
-    scribbling = true;
     std::fill_n(model_input->data.f, 28 * 28, 0.0f);
 }
 
@@ -326,6 +322,29 @@ void outputModelInputAsASCIIArt() {
     }
 }
 
+void sendScribbleInput(const uint16_t x, const uint16_t y) {
+    Serial1.write(NT_SCRIBBLE_INPUT);
+    Serial1.write(static_cast<char>(x));
+    Serial1.write(static_cast<char>(y));
+    Serial1.flush();
+}
+
+void sendCharacter(const char *character) {
+    Serial1.write(NT_CHARACTER_DETECTED);
+    Serial1.write(character, 1);
+    Serial1.flush();
+}
+
+void sendBackspace() {
+    Serial1.write(NT_BACKSPACE_DETECTED);
+    Serial1.flush();
+}
+
+void sendSpace() {
+    Serial1.write(NT_SPACE_DETECTED);
+    Serial1.flush();
+}
+
 void loop() {
     if (millis() - lastSessionEndTime.count() > 100 && drAsserted()) {
         pinnacleGetAbsolute(&touchData);
@@ -348,6 +367,9 @@ void loop() {
                             }
                         }
                     }
+                }
+                if (gestureTouchSamples >= 10) {
+                    sendScribbleInput(scribbleData.xValue, scribbleData.yValue);
                 }
             }
             if (touchData.zValue > 20) {
@@ -388,7 +410,7 @@ void loop() {
                     }
                 }
                 gestureTouchSamples++;
-                maxX= std::max(maxX, touchData.xValue);
+                maxX = std::max(maxX, touchData.xValue);
                 minX = std::min(minX, touchData.xValue);
                 maxY = std::max(maxY, touchData.yValue);
                 minY = std::min(minY, touchData.yValue);
@@ -400,19 +422,15 @@ void loop() {
             }
             lastMovementTime = std::chrono::milliseconds(millis());
         }
-    } else if (inSession && millis() - lastMovementTime.count() > 400) {
-        Serial.println("gestureTouchSamples: " + String(gestureTouchSamples));
+    } else if (inSession && millis() - lastMovementTime.count() > (scribbling ? 500 : 180)) {
         inSession = false;
-        uint16_t deltaX = maxX - minX;
-        uint16_t deltaY = maxY - minY;
-        Serial.println("deltaX: " + String(deltaX));
-        Serial.println("deltaY: " + String(deltaY));
-        outputModelInputAsASCIIArt();
+        const uint16_t deltaX = maxX - minX;
+        const uint16_t deltaY = maxY - minY;
         if (gestureTouchSamples >= 10 && deltaX >= 200 && deltaY <= 200) {
             if (lastX > firstX) {
-                Serial.println("SPACE");
+                sendSpace();
             } else {
-                Serial.println("BACKSPACE");
+                sendBackspace();
             }
         } else if (deltaY < 200 && gestureTouchSamples > 3 && gestureTouchSamples < 20 && !gestureSent) {
             if (touchDowns <= 5) {
@@ -458,6 +476,7 @@ void loop() {
 
             if (max_value > 0.55f) {
                 MicroPrintf("Prediction: %s", kCategoryLabels[max_index]);
+                sendCharacter(kCategoryLabels[max_index]);
             } else {
                 MicroPrintf("Failed to recognize character, confidence too low.");
             }
@@ -508,14 +527,21 @@ void loop() {
         } else if (type == static_cast<char>(RT_G_FORCE_ROTATE)) {
             Serial.println("RT_G_FORCE_ROTATE");
             forcedGesture = G_ROTATE;
+            scribbling = false;
         } else if (type == static_cast<char>(RT_G_FORCE_VERTICAL)) {
             Serial.println("RT_G_FORCE_VERTICAL");
             forcedGesture = G_VERTICAL;
+            scribbling = false;
         } else if (type == static_cast<char>(RT_G_FORCE_HORIZONTAL)) {
             forcedGesture = G_HORIZONTAL;
+            scribbling = false;
         } else if (type == static_cast<char>(RT_G_SET_AUTO)) {
             Serial.println("RT_G_SET_AUTO");
             forcedGesture = G_NONE;
+            scribbling = false;
+        } else if (type == static_cast<char>(RT_SCRIBBLE)) {
+            Serial.println("RT_SCRIBBLE");
+            scribbling = true;
         }
     }
 
